@@ -323,8 +323,18 @@ class NoiseGate:
             self._floor += (level - self._floor) * 0.0008
         self._floor = max(1e-5, self._floor)
 
-    def step(self, level: float, threshold: float | None = None) -> bool:
-        """True when this chunk should pass through."""
+    def step(
+        self, level: float, threshold: float | None = None, can_open: bool = True
+    ) -> bool:
+        """True when this chunk should pass through.
+
+        `can_open` gates opening only, never staying open. Anything that vetoes
+        a chunk after the fact overrides the hysteresis and the hangover — and
+        those exist precisely to carry a sentence through its quiet syllables.
+        A veto applied per chunk punched holes in ordinary speech: forty to
+        sixty per cent of every second replaced with silence, which the server
+        never assembled into a turn.
+        """
         if self.adaptive and threshold is None:
             self.observe(level)
         opening = self.opening_level if threshold is None else threshold
@@ -332,7 +342,7 @@ class NoiseGate:
         # little enough that a trailing syllable still counts as speech.
         staying = opening * 0.6
 
-        if level >= opening:
+        if level >= opening and can_open:
             self._open = True
             self._countdown = self.release
         elif self._open and level >= staying:

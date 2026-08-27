@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.baranskyi.omavoice",
   "name": "Omavoice",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "author": "Slava Baranskyi",
   "license": "MIT",
   "description": "Talk to a local agent out loud. OpenAI Realtime does the hearing and the speaking; codex or claude finds the answer on this machine and on the web.",

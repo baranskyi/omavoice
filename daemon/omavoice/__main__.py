@@ -243,13 +243,24 @@ class Daemon:
         if self._room_is_loud():
             threshold = self.gate.opening_level * _SPEAKING_GATE_MULTIPLIER
 
-        passed = self.gate.step(level, threshold)
-        if passed and threshold is None:
-            # Two questions, not one. The gate asks whether this stands out from
-            # the room; this asks whether what stands out is loud enough to be a
-            # voice once the quiet-microphone gain is applied. Amplifying a
-            # fan by ten turns it into confident nonsense the assistant answers.
-            passed = self.autogain.is_speech_after_gain(rms_full_scale(chunk))
+        # Two questions, but only one of them decides when the gate opens. The
+        # level says this stands out from the room; the second says what stands
+        # out is loud enough to be a voice once the quiet-microphone gain is
+        # applied, which is what keeps an amplified fan from being answered.
+        # Neither may close a gate that is already carrying a sentence.
+        loudness = rms_full_scale(chunk)
+        # What the gain learns from and what the gate opens on are deliberately
+        # different questions. Learning from "stands out from the room" rather
+        # than from "already passed" breaks a deadlock: on a very quiet
+        # microphone the gate cannot open until the gain is up, and the gain
+        # cannot rise until something passes. Measured, that deadlock silenced
+        # a voice twelve times quieter than this one completely.
+        stands_out = level >= (
+            threshold if threshold is not None else self.gate.opening_level
+        )
+        passed = self.gate.step(
+            level, threshold, can_open=self.autogain.is_speech_after_gain(loudness)
+        )
         if self.cfg.debug:
             # The one number that settles "why did it not hear me": the level
             # the microphone actually delivered, against the threshold it had
@@ -280,7 +291,7 @@ class Daemon:
         # Never trained on the assistant's own voice. Echo passes the gate on
         # speakers, and gain learned from it is gain applied to it — the loop
         # feeding itself.
-        self.autogain.observe(rms_full_scale(chunk), passed and threshold is None)
+        self.autogain.observe(loudness, stands_out and threshold is None)
 
         if passed:
             # Gain is for a quiet person, never for the room while the speakers
@@ -408,10 +419,19 @@ class Daemon:
         self.server.broadcast(answer.as_ui_payload())
         return answer
 
-    # How long someone may talk into a session that has stopped answering
-    # before we stop believing in it. Long enough that a thoughtful pause in
-    # the middle of a sentence is never mistaken for a wedged session.
-    _DEAF_AFTER_SECONDS = 6.0
+    # How long a session may say nothing at all before we stop believing in it.
+    #
+    # Six seconds looked generous when the only audio reaching this check was
+    # speech. It is not: room noise clears the gate too, so "audio flowing"
+    # stopped meaning "someone is talking", and the watchdog began rebuilding
+    # healthy sessions in the middle of conversations — which is what the panel
+    # was reporting as "session stopped responding".
+    #
+    # The wedge this exists for is unmistakable by comparison: in the case it
+    # was written for, the server emitted nothing for twenty-one seconds while
+    # the socket kept accepting audio. Twenty catches that and leaves ordinary
+    # quiet alone.
+    _DEAF_AFTER_SECONDS = 20.0
 
     def _check_deaf_server(self, session: RealtimeSession) -> None:
         """Notice a session that has stopped hearing, and rebuild it.

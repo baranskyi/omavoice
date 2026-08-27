@@ -244,6 +244,12 @@ class Daemon:
             threshold = self.gate.opening_level * _SPEAKING_GATE_MULTIPLIER
 
         passed = self.gate.step(level, threshold)
+        if passed and threshold is None:
+            # Two questions, not one. The gate asks whether this stands out from
+            # the room; this asks whether what stands out is loud enough to be a
+            # voice once the quiet-microphone gain is applied. Amplifying a
+            # fan by ten turns it into confident nonsense the assistant answers.
+            passed = self.autogain.is_speech_after_gain(rms_full_scale(chunk))
         if self.cfg.debug:
             # The one number that settles "why did it not hear me": the level
             # the microphone actually delivered, against the threshold it had
@@ -271,10 +277,18 @@ class Daemon:
 
         # Measured before the gain, so the gate keeps judging the microphone
         # against its own noise floor rather than against how loud we made it.
-        self.autogain.observe(rms_full_scale(chunk), passed)
+        # Never trained on the assistant's own voice. Echo passes the gate on
+        # speakers, and gain learned from it is gain applied to it — the loop
+        # feeding itself.
+        self.autogain.observe(rms_full_scale(chunk), passed and threshold is None)
 
         if passed:
-            chunk = self.autogain.apply(chunk)
+            # Gain is for a quiet person, never for the room while the speakers
+            # are working. Whatever leaks past the canceller in that window is
+            # the assistant's own voice, and multiplying it by ten is how a
+            # residue that transcribed as nothing becomes a sentence it answers.
+            if threshold is None:
+                chunk = self.autogain.apply(chunk)
             self._pending_level = max(self._pending_level, level)
             self._pending_bands = bands
         else:

@@ -181,6 +181,16 @@ class AutoGain:
     # becomes a shout.
     MIN_GAIN = 1.0
     MAX_GAIN = 16.0
+    # Speech is normalised to TARGET, so "far below TARGET after gain" is a
+    # statement about content rather than about this microphone or this room —
+    # which is the whole reason to judge here rather than in device units. Room
+    # noise lifted by a gain meant for a quiet voice lands around a twentieth of
+    # target; a voice lands on it. A fifth leaves both a wide margin.
+    SPEECH_FLOOR = TARGET / 5
+
+    def is_speech_after_gain(self, level_full_scale: float) -> bool:
+        """Would this chunk still look like speech once amplified?"""
+        return level_full_scale * self.gain >= self.SPEECH_FLOOR
 
     def __init__(self, chunk_ms: int = 20) -> None:
         self._speech_peak = 0.0

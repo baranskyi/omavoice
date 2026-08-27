@@ -225,6 +225,37 @@ async def resolve(
     # would leave the session deaf.
     if await _node_exists(AEC_SOURCE):
         chosen = configured_input or AEC_SOURCE
+        if chosen != AEC_SOURCE:
+            # The one combination that cannot work, and the one that is easy to
+            # assemble by accident: playing into the canceller's sink while
+            # recording straight off a device. The canceller dutifully subtracts
+            # the echo — into its own source, which nobody is listening to — and
+            # the assistant answers its own last sentence. It has to be both
+            # ends or neither.
+            default = await _default_source()
+            if chosen == default:
+                log.info(
+                    "%s is what the echo canceller is capturing — listening through "
+                    "it instead, so the same microphone arrives without the echo",
+                    chosen,
+                )
+                chosen = AEC_SOURCE
+            else:
+                log.warning(
+                    "%s is not the microphone the echo canceller captures (%s), so "
+                    "cancellation cannot cover it — playing to the plain sink "
+                    "instead. Expect the assistant to hear itself on speakers.",
+                    chosen,
+                    default or "none",
+                )
+                return Devices(
+                    chosen,
+                    configured_output or sink,
+                    False,
+                    f"speakers — {why}, chosen microphone is outside the canceller",
+                    f"{await _describe_source(chosen)} · echo cancellation unavailable",
+                    AEC_SOURCE,
+                )
         return Devices(
             chosen,
             configured_output or AEC_SINK,

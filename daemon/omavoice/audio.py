@@ -142,17 +142,82 @@ class NoiseGate:
                   hovering near the threshold does not chatter the gate
       hangover    once open it stays open briefly, so the quiet tail of a
                   sentence is not amputated mid-word
+
+    The threshold itself is measured rather than configured. A fixed number is
+    only ever right for the microphone it was picked on: a laptop mic at
+    talking distance and a display mic across the desk differ by more than an
+    order of magnitude, and the echo canceller's noise suppression moves the
+    floor again. Tuned for one, the same constant either answers the fan or
+    swallows half a sentence — which is exactly what happened here.
+
+    So the gate tracks the room's noise floor continuously and opens at a
+    multiple of it. The floor falls quickly and rises slowly: speech should
+    drag it up barely at all, while plugging in a different microphone should
+    be forgotten within seconds. `OMAVOICE_GATE` still accepts a number for
+    anyone who would rather pin it.
     """
 
-    def __init__(self, threshold: float, hangover_ms: int = 700, chunk_ms: int = 20) -> None:
+    # Speech sits far above a room's floor — 20 dB is a whisper's worth of
+    # margin. Opening at eight times the floor clears fans, keyboards and
+    # residual echo while leaving a quiet voice comfortable room.
+    OPEN_OVER_FLOOR = 8.0
+    # Below this the input is silent enough that the ratio stops meaning
+    # anything: without it, a digitally-clean source drives the threshold to
+    # zero and every bit of noise counts as speech.
+    FLOOR_MIN = 0.0004
+    # And above this something is wrong — a loud room, a hot input — and a
+    # ratio would lock the person out of their own microphone.
+    OPEN_MAX = 0.05
+
+    def __init__(self, threshold: float | None, hangover_ms: int = 700, chunk_ms: int = 20) -> None:
+        # None means "measure it"; a number means the user pinned it.
         self.threshold = threshold
         self.release = max(1, int(hangover_ms / max(1, chunk_ms)))
         self._open = False
         self._countdown = 0
+        self._floor = self.FLOOR_MIN
+
+    @property
+    def adaptive(self) -> bool:
+        return self.threshold is None
+
+    @property
+    def noise_floor(self) -> float:
+        return self._floor
+
+    @property
+    def opening_level(self) -> float:
+        """The level speech has to reach right now to open the gate."""
+        if self.threshold is not None:
+            return self.threshold
+        return min(self.OPEN_MAX, max(self.FLOOR_MIN, self._floor) * self.OPEN_OVER_FLOOR)
+
+    def observe(self, level: float) -> None:
+        """Fold one chunk into the noise-floor estimate.
+
+        Asymmetric on purpose, in two ways.
+
+        Downward it follows almost immediately, so a quieter microphone is
+        adopted within a second or two. Upward it crawls, so a passing noise
+        does not drag the threshold along with it.
+
+        And upward only while the gate is shut. Nothing heard during speech may
+        raise the floor: a slow climb is invisible over one sentence but adds
+        up over a monologue, and the gate ends up cutting off the very person
+        it opened for. Falling is always allowed — that can only make the gate
+        more willing to listen.
+        """
+        if level < self._floor:
+            self._floor += (level - self._floor) * 0.25
+        elif not self._open:
+            self._floor += (level - self._floor) * 0.0008
+        self._floor = max(1e-5, self._floor)
 
     def step(self, level: float, threshold: float | None = None) -> bool:
         """True when this chunk should pass through."""
-        opening = self.threshold if threshold is None else threshold
+        if self.adaptive and threshold is None:
+            self.observe(level)
+        opening = self.opening_level if threshold is None else threshold
         # 60% of the opening level: enough hysteresis to stop chattering,
         # little enough that a trailing syllable still counts as speech.
         staying = opening * 0.6

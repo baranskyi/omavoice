@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 import signal
 import sys
 import time
@@ -51,6 +52,37 @@ _SPEAKING_GATE_MULTIPLIER = 2.6
 _ECHO_TAIL_SECONDS = 0.9
 
 
+def _log_task_failure(task: asyncio.Task) -> None:
+    """Surface a background task that died.
+
+    Audio is sent without awaiting — one chunk must never hold up the next.
+    The cost is that an exception in there has nobody to raise to, and the
+    failure looks like a microphone that stopped working for no reason.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        log.error("background task failed: %r", exc)
+
+
+def _opens_conversation(heard: str) -> bool:
+    """Has the person actually said something?
+
+    The bar is deliberately low: any transcript with a character in it counts.
+    What this guards is only "do not speak before you are spoken to" — the
+    session opens on a keypress, so without it the assistant greets the room.
+
+    It used to demand two words, on the theory that a lone interjection is
+    usually noise. That was the wrong trade. When anything upstream went wrong
+    and transcripts arrived truncated, the rule turned a half-heard question
+    into total silence, which reads as a broken assistant rather than as a
+    careful one. Judging whether a heard sentence deserves an answer is the
+    model's job, and its prompt already covers it.
+    """
+    return any(c.isalnum() for c in heard)
+
+
 class Daemon:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -59,7 +91,16 @@ class Daemon:
 
         self.speaker = Speaker(cfg, on_level=self._on_output_level)
         self.mic = Microphone(cfg, self._on_input_chunk)
-        self.gate = NoiseGate(cfg.gate_level, chunk_ms=cfg.chunk_ms)
+        # The gate must hold open longer than the server waits before calling a
+        # turn finished. Otherwise a pause between words outlives the hangover,
+        # the gate substitutes digital silence for the rest of it, and we hand
+        # the server a cleaner silence than the room ever produced — talking it
+        # into ending a sentence the person is still in the middle of.
+        self.gate = NoiseGate(
+            cfg.gate_level,
+            hangover_ms=cfg.silence_ms + 300,
+            chunk_ms=cfg.chunk_ms,
+        )
         self.session: RealtimeSession | None = None
 
         # Playback runs on its own task, fed by this queue. Writing to pw-play
@@ -153,11 +194,37 @@ class Daemon:
         # The model streams an answer faster than it plays, so the state can
         # flip back to listening while the speakers are still working through
         # the buffer — and that gap is where the assistant used to hear itself.
-        threshold = self.cfg.gate_level
+        # A threshold is passed only while the speakers are working: raised, so
+        # residual echo cannot pose as speech, and explicit so the gate knows
+        # not to fold this stretch into its estimate of the room. The rest of
+        # the time it uses — and updates — its own measured level.
+        threshold = None
         if self._room_is_loud():
-            threshold *= _SPEAKING_GATE_MULTIPLIER
+            threshold = self.gate.opening_level * _SPEAKING_GATE_MULTIPLIER
 
-        if self.gate.step(level, threshold):
+        passed = self.gate.step(level, threshold)
+        if self.cfg.debug:
+            # The one number that settles "why did it not hear me": the level
+            # the microphone actually delivered, against the threshold it had
+            # to clear. Once a second, so a conversation stays readable.
+            self._peak_level = max(getattr(self, "_peak_level", 0.0), level)
+            self._passed_chunks = getattr(self, "_passed_chunks", 0) + (1 if passed else 0)
+            self._level_chunks = getattr(self, "_level_chunks", 0) + 1
+            if self._level_chunks * self.cfg.chunk_ms >= 1000:
+                log.debug(
+                    "mic: peak=%.4f gate=%.4f floor=%.4f passed=%d/%d sent=%d",
+                    self._peak_level,
+                    threshold if threshold is not None else self.gate.opening_level,
+                    self.gate.noise_floor,
+                    self._passed_chunks,
+                    self._level_chunks,
+                    session.sent_events,
+                )
+                self._peak_level = 0.0
+                self._passed_chunks = 0
+                self._level_chunks = 0
+
+        if passed:
             self._pending_level = max(self._pending_level, level)
             self._pending_bands = bands
         else:
@@ -166,7 +233,8 @@ class Daemon:
             chunk = bytes(len(chunk))
             self._pending_level = max(self._pending_level, 0.0)
 
-        asyncio.create_task(session.send_audio(chunk))
+        task = asyncio.create_task(session.send_audio(chunk))
+        task.add_done_callback(_log_task_failure)
 
     def _room_is_loud(self) -> bool:
         if self.speaker.playing:
@@ -316,6 +384,15 @@ class Daemon:
             self.server.broadcast(
                 {"type": "transcript", "role": "user", "text": heard, "final": True}
             )
+
+            session = self.session
+            if session and session.awaiting_first_turn:
+                if _opens_conversation(heard):
+                    await session.open_floor()
+                else:
+                    # Shown in the waterfall regardless, so silence here reads
+                    # as a decision rather than as a dead microphone.
+                    log.info("not an opening turn, staying quiet: %r", heard)
 
         elif kind == "response.done":
             # Deliberately not flipping to listening here: the answer has
@@ -657,6 +734,9 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S",
     )
+    # Debug mode is for diagnosing this daemon, not the websocket library: its
+    # frame log buries every line worth reading under pages of base64 audio.
+    logging.getLogger("websockets").setLevel(logging.WARNING)
 
     runner = _headless(cfg) if args.headless else Daemon(cfg).run()
     try:

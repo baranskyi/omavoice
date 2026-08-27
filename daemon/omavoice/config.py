@@ -57,6 +57,17 @@ def _env_flag(name: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_gate() -> float | None:
+    """OMAVOICE_GATE: a number pins the threshold, "auto" measures it."""
+    raw = os.environ.get("OMAVOICE_GATE", "auto").strip().lower()
+    if raw in ("", "auto"):
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 @dataclass
 class Config:
     # --- audio -------------------------------------------------------------
@@ -86,19 +97,27 @@ class Config:
     transcription_model: str = field(
         default_factory=lambda: os.environ.get("OMAVOICE_TRANSCRIBE", "gpt-4o-transcribe")
     )
-    silence_ms: int = 500
-    # Higher than the 0.5 default: a built-in laptop mic hears keyboards, fans
-    # and the room, and every false positive is the assistant answering nobody.
+    # How long a pause has to last before the turn is considered finished.
+    # 500 ms is what the API suggests and it is too eager for a person
+    # composing a question out loud: "what is the weather in Malaga... in
+    # Spain" was being cut after the fourth word and sent as a fragment.
+    silence_ms: int = field(
+        default_factory=lambda: int(os.environ.get("OMAVOICE_SILENCE_MS", "1100"))
+    )
+    # The API default. It used to be 0.82, on the theory that a laptop mic hears
+    # keyboards and fans and every false positive is the assistant answering
+    # nobody — but rejecting noise is the gate's job now, and it measures the
+    # room rather than guessing at it. Left strict, this reads a pause between
+    # words as the end of a sentence and commits half a question.
     vad_threshold: float = field(
-        default_factory=lambda: float(os.environ.get("OMAVOICE_VAD", "0.82"))
+        default_factory=lambda: float(os.environ.get("OMAVOICE_VAD", "0.5"))
     )
     # Microphone level below which audio is treated as room noise and replaced
-    # with silence. Normal speech at arm's length sits far above this; fans,
-    # keyboards and residual echo sit below. Raise it if the assistant still
-    # answers nobody, lower it if it misses you when you speak quietly.
-    gate_level: float = field(
-        default_factory=lambda: float(os.environ.get("OMAVOICE_GATE", "0.055"))
-    )
+    # with silence. "auto" — the default — measures the room's noise floor and
+    # follows it, because a fixed number is only ever right for the microphone
+    # it was picked on: a laptop mic at talking distance and a display mic
+    # across the desk are an order of magnitude apart. Set a number to pin it.
+    gate_level: float | None = field(default_factory=lambda: _env_gate())
 
     # --- brain -------------------------------------------------------------
     backend: str = field(default_factory=lambda: os.environ.get("OMAVOICE_BACKEND", "codex"))

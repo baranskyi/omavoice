@@ -119,12 +119,27 @@ and the rest of the system never notices.
 
 Two more layers sit on top of the canceller, because one is not enough:
 
-- **A noise gate** (`OMAVOICE_GATE`). A laptop microphone hears the fan,
-  the keyboard and the room; transcription turns that into confident nonsense —
-  `はい。`, `Gjiliv.` — and the assistant duly answers it. Everything below the
-  threshold is *replaced with silence* rather than dropped, because the server
-  side VAD needs a continuous stream. Hysteresis and a 700 ms hold keep it from
-  clipping the quiet tail of a sentence.
+- **A noise gate**, which measures its own threshold. A microphone hears the
+  fan, the keyboard and the room; transcription turns that into confident
+  nonsense — `はい。`, `Gjiliv.` — and the assistant duly answers it. Everything
+  below the threshold is *replaced with silence* rather than dropped, because
+  the server side VAD needs a continuous stream.
+
+  The threshold is not a constant, because a constant is only ever right for
+  the microphone it was picked on. A laptop mic at talking distance and a
+  display mic across the desk are an order of magnitude apart, and the
+  canceller's noise suppression moves the floor again; tuned for one, the same
+  number either answers the fan or swallows half a sentence. So the gate tracks
+  the room's noise floor and opens at eight times it — falling fast, so a
+  different microphone is adopted in seconds, and rising only while the gate is
+  shut, so a long answer of your own cannot walk the threshold up behind you.
+  `OMAVOICE_GATE` takes a number if you would rather pin it.
+
+  It holds open for longer than the server waits before calling a turn
+  finished (`OMAVOICE_SILENCE_MS`, 1100 ms). That ordering matters: a shorter
+  hold means the gate substitutes digital silence for the pause between two
+  words, handing the server a cleaner silence than the room ever produced and
+  talking it into ending a sentence you are still in the middle of.
 - **Counting real playback time.** The model sends its answer far faster than it
   is spoken, so "the last chunk arrived" and "the room went quiet" are different
   moments, sometimes seconds apart. The microphone's threshold stays raised
@@ -133,8 +148,20 @@ Two more layers sit on top of the canceller, because one is not enough:
   can I help?" the assistant would hear "Why can you help me?" and answer it.
 
 None of this stops you interrupting: live speech clears the threshold with room
-to spare and residual echo does not. If something still gets through, raise
-`OMAVOICE_GATE`; headphones remove the question entirely.
+to spare and residual echo does not. If something still gets through, pin
+`OMAVOICE_GATE` to a number above what leaks; headphones remove the question
+entirely.
+
+When a conversation misbehaves, run the daemon with `OMAVOICE_DEBUG=1` and read
+one line per second:
+
+```
+mic: peak=0.3241 gate=0.0032 floor=0.0002 passed=50/50 sent=248
+```
+
+`peak` against `gate` settles "why did it not hear me" in one glance, and `sent`
+settles the harder question of whether the audio ever reached the server at
+all.
 
 ## Using it
 

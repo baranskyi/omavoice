@@ -64,6 +64,11 @@ INSTRUCTIONS = """\
 You are the voice of a local assistant running on this computer. You are its \
 ears and its mouth — you are NOT its memory and NOT its source of facts.
 
+You never speak first. A session opens because someone pressed a key, not \
+because they said anything: the panel simply shows that it is listening, and \
+the first word of the conversation is theirs. Do not greet, do not introduce \
+yourself, do not ask what they need, do not fill the silence.
+
 Hard rule: any question whose answer depends on facts — about files, projects, \
 configs, running processes on this machine, or about people, companies, news, \
 prices, code, documentation, anything in the outside world — you MUST send to \
@@ -154,6 +159,16 @@ class RealtimeSession:
         # so out loud — which would surface in the panel as a red failure. So
         # we track what is actually in flight instead of cancelling hopefully.
         self._response_active = False
+        # The floor belongs to the person until they have used it once. See
+        # open_floor() for why this is a switch in the daemon and not a line
+        # in the prompt.
+        self._await_first_turn = True
+        self.sent_events = 0
+        self._warned_no_socket = False
+
+    @property
+    def awaiting_first_turn(self) -> bool:
+        return self._await_first_turn
 
     @property
     def connected(self) -> bool:
@@ -166,6 +181,9 @@ class RealtimeSession:
 
         url = f"{WS_URL}?model={self.cfg.model}"
         log.info("connecting to %s", self.cfg.model)
+        self._await_first_turn = True
+        self.sent_events = 0
+        self._warned_no_socket = False
         self._ws = await websockets.connect(
             url,
             additional_headers={"Authorization": f"Bearer {self.cfg.api_key}"},
@@ -195,6 +213,11 @@ class RealtimeSession:
                             "transcription": {"model": self.cfg.transcription_model},
                             "turn_detection": {
                                 "type": "server_vad",
+                                # Off until the person has spoken once: with it
+                                # on, server VAD answers whatever it decided was
+                                # a turn, and at the moment a panel opens that is
+                                # usually the room rather than a person.
+                                "create_response": not self._await_first_turn,
                                 "threshold": self.cfg.vad_threshold,
                                 "prefix_padding_ms": 300,
                                 "silence_duration_ms": self.cfg.silence_ms,
@@ -208,6 +231,26 @@ class RealtimeSession:
                 },
             }
         )
+
+    async def open_floor(self) -> None:
+        """Hand the conversation over to the model, and answer this turn.
+
+        A session opens on a keypress, so the first thing the microphone hears
+        is a room, not a request — and with the server creating responses on
+        its own, the assistant greeted an empty desk and then chatted with the
+        fan. The prompt asks it not to; a prompt is a request, and this is the
+        guarantee: the server is told not to answer at all until the daemon
+        has seen a transcript that reads like someone addressing it.
+
+        Only the opening turn pays for this. From here on the session behaves
+        normally, answering the moment VAD hears the end of a sentence rather
+        than waiting for its transcript.
+        """
+        if not self._await_first_turn:
+            return
+        self._await_first_turn = False
+        await self._configure()
+        await self._send({"type": "response.create"})
 
     async def close(self) -> None:
         for task in self._tools.values():
@@ -227,13 +270,26 @@ class RealtimeSession:
     async def _send(self, event: dict) -> None:
         ws = self._ws
         if ws is None:
+            # Audio is sent fire-and-forget, so a socket that quietly went away
+            # would otherwise show up as nothing at all: the microphone keeps
+            # metering, the panel keeps saying "listening", and the server
+            # never hears another word. Say it once, loudly.
+            if not self._warned_no_socket:
+                self._warned_no_socket = True
+                log.warning("dropping %s — no socket", event.get("type"))
             return
         async with self._send_lock:
             try:
                 await ws.send(json.dumps(event))
-            except websockets.ConnectionClosed:
-                log.warning("send on a closed socket: %s", event.get("type"))
+                self.sent_events += 1
+            except websockets.ConnectionClosed as closed:
+                log.warning(
+                    "send on a closed socket: %s (code=%s)", event.get("type"), closed.code
+                )
                 self._ws = None
+            except Exception:  # noqa: BLE001
+                # Anything else used to vanish into an un-awaited task.
+                log.exception("send failed: %s", event.get("type"))
 
     async def send_audio(self, pcm: bytes) -> None:
         await self._send(

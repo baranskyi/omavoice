@@ -33,13 +33,23 @@ else
   note "created $VENV"
 fi
 
-if command -v uv >/dev/null; then
-  uv pip install --quiet --python "$VENV/bin/python" 'websockets>=13.0'
-else
-  "$VENV/bin/python" -m pip install --quiet --upgrade pip
-  "$VENV/bin/python" -m pip install --quiet 'websockets>=13.0'
+# Only what the lockfile names, and only if its digest matches. This used to
+# resolve a lower bound at install time and, on the fallback path, upgrade pip
+# to whatever was current first — two ways for an unreviewed release to end up
+# inside a service that runs on every login. --require-hashes refuses a
+# mismatch outright rather than warning about it, and pip is left alone.
+LOCK="$PLUGIN_DIR/daemon/requirements.lock"
+if [[ ! -f "$LOCK" ]]; then
+  echo "missing $LOCK — refusing to install anything unpinned" >&2
+  exit 1
 fi
-note "websockets installed"
+
+if command -v uv >/dev/null; then
+  uv pip install --quiet --python "$VENV/bin/python" --require-hashes -r "$LOCK"
+else
+  "$VENV/bin/python" -m pip install --quiet --require-hashes --no-deps -r "$LOCK"
+fi
+note "dependencies installed from $LOCK, digests verified"
 
 # --- 2. systemd unit ---------------------------------------------------------
 # The PATH is captured from this shell rather than hardcoded: the daemon shells

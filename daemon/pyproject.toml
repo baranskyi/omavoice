@@ -1,9 +1,11 @@
 [project]
 name = "omavoice"
-version = "0.2.1"
+version = "0.2.2"
 description = "Voice assistant daemon for the Omarchy shell: OpenAI Realtime for speech, a local agent for answers"
 requires-python = ">=3.11"
 dependencies = [
+    # The runtime version is fixed by daemon/requirements.lock, which is what
+    # setup.sh installs from; this bound only documents the floor the code needs.
     "websockets>=13.0",
 ]
 

@@ -62,9 +62,16 @@ Everything here is external to the plugin and none of it is installed for you.
 | **PipeWire** with `pw-record` / `pw-play` | audio in and out | standard on Omarchy |
 | **Python 3.11+** | the daemon | `uv` is used if present, otherwise `python -m venv` |
 
-The only thing downloaded during setup is `websockets` from PyPI, into a
-virtualenv under `~/.local/share/omavoice/`. Nothing is installed system
-wide and nothing asks for `sudo`.
+The only thing downloaded during setup is `websockets`, into a virtualenv under
+`~/.local/share/omavoice/`. Nothing is installed system wide and nothing asks
+for `sudo`.
+
+It is installed from `daemon/requirements.lock`, where the version is pinned
+and every artifact is bound to a digest, with `--require-hashes` — which
+refuses a mismatch rather than warning about it. `pip` is not upgraded. The
+daemon runs as a user service on every login, and resolving a version range at
+install time would let a future or compromised release into it without anyone
+having looked.
 
 ## Install
 

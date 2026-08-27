@@ -29,6 +29,7 @@ Item {
   property bool opened: false
 
   property bool settingsOpen: false
+  property bool helpOpen: false
   property string keyError: ""
 
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "io.github.baranskyi.omavoice"
@@ -146,9 +147,17 @@ Item {
     function close(): void { root.dismiss() }
     function toggle(): void { root.toggle() }
     function settings(): void { root.settingsOpen = !root.settingsOpen }
+    function help(): void { root.helpOpen = !root.helpOpen }
     function reset(): void { client.reset() }
     function state(): string { return client.voiceState }
     function backend(): string { return client.backend }
+  }
+
+  HelpWindow {
+    id: helpWindow
+    open: root.helpOpen && root.opened
+    backend: client.backend
+    onClosed: root.helpOpen = false
   }
 
   SettingsWindow {
@@ -257,6 +266,9 @@ Item {
             // away and lets the answer finish; this cuts it off. Neither forgets —
             // that is N.
             root.endSession()
+            event.accepted = true
+          } else if (event.key === Qt.Key_H) {
+            root.helpOpen = true
             event.accepted = true
           } else if (event.key === Qt.Key_N) {
             // New conversation: forgets the Realtime history, the agent's
@@ -385,7 +397,7 @@ Item {
             anchors.rightMargin: Style.spaceReal(8)
             anchors.verticalCenter: parent.verticalCenter
             text: client.connected
-              ? "Esc — background · I — interrupt · N — new · Q — stop"
+              ? "Esc — background · I — interrupt · N — new · Q — stop · H — help"
               : "Start the daemon:  systemctl --user start omavoice"
             textFormat: Text.PlainText
             wrapMode: Text.Wrap

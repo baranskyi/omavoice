@@ -180,6 +180,7 @@ all.
 | Interrupt an answer | `I` in the panel, or `omavoice-ctl cancel` |
 | Start a new conversation | `N` in the panel, or `omavoice-ctl reset` |
 | Settings | ⚙ in the panel, or `omarchy-shell io.github.baranskyi.omavoice settings` |
+| How it works | `H` in the panel, or `omarchy-shell io.github.baranskyi.omavoice help` |
 | Change the voice | ⚙ → the voice chip, or `omavoice-ctl voice cedar` |
 | List the voices | `omavoice-ctl voice` |
 | Switch agent | `Tab` in the panel, click the badge, or `omavoice-ctl backend claude` |

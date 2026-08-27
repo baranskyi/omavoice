@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.baranskyi.omavoice",
+  "name": "Omavoice",
+  "version": "0.1.0",
+  "author": "Slava Baranskyi",
+  "license": "MIT",
+  "description": "Talk to a local agent out loud. OpenAI Realtime does the hearing and the speaking; codex or claude finds the answer on this machine and on the web.",
+  "repository": "https://github.com/baranskyi/omavoice",
+  "kinds": ["overlay", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "overlay": "Overlay.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Omavoice",
+    "description": "Voice assistant with access to this machine",
+    "category": "Productivity",
+    "aliases": ["voice", "assistant", "microphone", "speech", "голос"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "backend": "codex",
+      "showLabel": false
+    },
+    "schema": [
+      {
+        "key": "backend",
+        "type": "enum",
+        "label": "Local agent",
+        "description": "Who finds the answer: codex runs on a ChatGPT subscription, claude knows your skills and MCP servers.",
+        "options": ["codex", "claude"],
+        "defaultValue": "codex"
+      },
+      {
+        "key": "showLabel",
+        "type": "boolean",
+        "label": "Show state as text",
+        "description": "Next to the icon in the bar.",
+        "defaultValue": false
+      }
+    ]
+  }
+}

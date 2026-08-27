@@ -1,0 +1,41 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["spoken", "markdown", "links", "files"],
+  "properties": {
+    "spoken": {
+      "type": "string",
+      "description": "The answer as it will be SPOKEN ALOUD. One to three sentences, plain conversational prose in the same language the question was asked in. No markdown, no bullet lists, no URLs, no file paths read out character by character."
+    },
+    "markdown": {
+      "type": "string",
+      "description": "The same answer for the small on-screen panel. Minimalist markdown: short lines, at most a handful of bullets, no headings above level 3, no images. Empty string when the spoken answer needs nothing on screen."
+    },
+    "links": {
+      "type": "array",
+      "description": "Web links worth a button. Empty when there are none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "url"],
+        "properties": {
+          "label": { "type": "string", "description": "Two or three words." },
+          "url": { "type": "string", "description": "Absolute http(s) URL." }
+        }
+      }
+    },
+    "files": {
+      "type": "array",
+      "description": "Local files or directories worth a button. Empty when there are none.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["label", "path"],
+        "properties": {
+          "label": { "type": "string", "description": "Two or three words." },
+          "path": { "type": "string", "description": "Absolute path on this machine." }
+        }
+      }
+    }
+  }
+}

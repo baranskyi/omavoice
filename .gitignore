@@ -1,0 +1,7 @@
+# The key lives in ~/.config/omavoice/env, never here.
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+preview*.xcf

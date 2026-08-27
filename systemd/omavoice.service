@@ -1,0 +1,27 @@
+# Template. scripts/setup.sh substitutes the @PLACEHOLDERS@ and installs the
+# result into ~/.config/systemd/user/. Editing this file does nothing until
+# setup.sh runs again.
+[Unit]
+Description=Omavoice — voice assistant daemon
+Documentation=https://github.com/baranskyi/omavoice
+After=pipewire.service
+Wants=pipewire.service
+
+[Service]
+Type=simple
+# The key lives here rather than in the shell environment so it is not visible
+# to every process the user starts.
+EnvironmentFile=-%h/.config/omavoice/env
+ExecStart=@VENV@/bin/python -m omavoice
+WorkingDirectory=@PLUGIN_DIR@/daemon
+Environment=PYTHONPATH=@PLUGIN_DIR@/daemon
+TimeoutStopSec=8
+Restart=on-failure
+RestartSec=2
+# The daemon shells out to codex/claude, which need the user's PATH. Captured
+# from the shell that ran setup.sh — version managers put those binaries in
+# places a bare systemd PATH does not have.
+Environment=PATH=@PATH@
+
+[Install]
+WantedBy=default.target

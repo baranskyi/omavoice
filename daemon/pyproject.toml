@@ -1,0 +1,15 @@
+[project]
+name = "omavoice"
+version = "0.1.0"
+description = "Voice assistant daemon for the Omarchy shell: OpenAI Realtime for speech, a local agent for answers"
+requires-python = ">=3.11"
+dependencies = [
+    "websockets>=13.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["omavoice"]

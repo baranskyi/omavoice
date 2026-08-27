@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# Talk to the omavoice daemon from a terminal.
+#
+# The panel keeps its own live socket instead of shelling out here — it needs
+# the push stream, and a subprocess per state change would be absurd. This is
+# for people and for scripts.
+set -euo pipefail
+
+# Resolve through symlinks: setup.sh puts one in ~/.local/bin, so $0 is usually
+# not the real file and the plugin directory has to be found from the target.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+  SELF="$(readlink -f "$SELF")"
+done
+PLUGIN_DIR="$(cd "$(dirname "$SELF")/.." && pwd)"
+
+# The daemon's virtualenv lives outside the plugin folder: Omarchy rejects a
+# plugin containing symlinks, and every virtualenv has some.
+DEFAULT_VENV="${XDG_DATA_HOME:-$HOME/.local/share}/omavoice/venv/bin/python"
+PYTHON="${OMAVOICE_PYTHON:-$DEFAULT_VENV}"
+
+if [[ ! -x "$PYTHON" ]]; then
+  PYTHON="$(command -v python3 || true)"
+  if [[ -z "$PYTHON" ]]; then
+    echo "omavoice: no python found — run scripts/setup.sh" >&2
+    exit 1
+  fi
+fi
+
+# The package is not installed into the virtualenv, only its dependencies are:
+# the source of truth is the plugin folder, so an update through
+# `omarchy plugin update` takes effect without reinstalling anything.
+export PYTHONPATH="$PLUGIN_DIR/daemon${PYTHONPATH:+:$PYTHONPATH}"
+
+exec "$PYTHON" -m omavoice.ctl "$@"

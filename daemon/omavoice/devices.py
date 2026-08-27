@@ -262,7 +262,14 @@ async def resolve(
             False,
             f"speakers — {why}, routed through the echo canceller",
             "Speakers · echo cancellation on",
-            await _default_source(),
+            # No fallback, deliberately. On speakers the canceller's source is
+            # the only correct input, because playback goes through its sink:
+            # swapping the microphone alone leaves the physical one hearing
+            # uncancelled speaker output, which is precisely the mismatched
+            # pair that makes the assistant answer its own last sentence. A
+            # session that says it cannot hear is a worse afternoon than one
+            # that talks to itself is an evening.
+            "",
         )
 
     source = await _default_source()

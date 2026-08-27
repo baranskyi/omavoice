@@ -499,7 +499,13 @@ class Microphone:
 
             if self._stopping:
                 return
-            attempts = 0 if delivered else attempts + 1
+            # A single frame is not evidence that a device works. A Bluetooth
+            # source whose transport is failing emits one and stalls, and
+            # counting that as success reset the patience every time — so it
+            # restarted forever and never reached the fallback it was owed.
+            # The same second-of-audio bar the limit below uses.
+            healthy = 1000 // max(1, self.cfg.chunk_ms)
+            attempts = 0 if delivered >= healthy else attempts + 1
             log.warning(
                 "microphone stream ended after %d chunks (%d this session, "
                 "pw-record exit=%s, target=%r) — restarting, attempt %d",

@@ -109,8 +109,9 @@ class Daemon:
         # the gate substitutes digital silence for the rest of it, and we hand
         # the server a cleaner silence than the room ever produced — talking it
         # into ending a sentence the person is still in the middle of.
-        self._last_event_at = 0.0
         self._recovering = False
+        self._speech_chunks = 0
+        self._speech_since = 0.0
         self.autogain = AutoGain(chunk_ms=cfg.chunk_ms)
         self.devices: device_choice.Devices | None = None
         # Microphones that failed to produce audio while this daemon has been
@@ -314,8 +315,12 @@ class Daemon:
         task = asyncio.create_task(session.send_audio(chunk))
         task.add_done_callback(_log_task_failure)
 
-        if passed:
-            self._check_deaf_server(session)
+        # Counted here, judged in the watchdog: how much of what we are sending
+        # actually looks like a voice. Silence and room noise must never make
+        # the case that a session has stopped listening.
+        if passed and self.autogain.is_speech_after_gain(loudness):
+            self._speech_chunks += 1
+        self._check_deaf_server(session)
 
     def _room_is_loud(self) -> bool:
         if self.speaker.playing:
@@ -432,6 +437,11 @@ class Daemon:
     # the socket kept accepting audio. Twenty catches that and leaves ordinary
     # quiet alone.
     _DEAF_AFTER_SECONDS = 20.0
+    # ...and how much of that window has to have been a voice. Without this the
+    # watchdog fires on a quiet room, because room noise clears the gate and
+    # "audio flowing" stopped meaning "someone is talking". It cut two good
+    # conversations short before this was added.
+    _DEAF_NEEDS_SPEECH_SECONDS = 10.0
 
     def _check_deaf_server(self, session: RealtimeSession) -> None:
         """Notice a session that has stopped hearing, and rebuild it.
@@ -451,11 +461,25 @@ class Daemon:
         if self.state != "listening" or self._recovering:
             return
         now = asyncio.get_running_loop().time()
-        if now - self._last_event_at < self._DEAF_AFTER_SECONDS:
+        # Any sign of life resets the case being built against the session.
+        if session.last_activity > self._speech_since:
+            self._speech_since = session.last_activity
+            self._speech_chunks = 0
+        # Read off the session rather than kept here: the daemon only sees the
+        # events it is interested in, and during a spoken answer that is none
+        # of them.
+        quiet_for = now - session.last_activity
+        if quiet_for < self._DEAF_AFTER_SECONDS:
+            return
+        # And the second half of the case: someone has been talking through it.
+        # Ten seconds of speech-level audio answered by nothing at all is a
+        # wedge; twenty seconds of a quiet room is a person thinking.
+        speaking_seconds = self._speech_chunks * self.cfg.chunk_ms / 1000
+        if speaking_seconds < self._DEAF_NEEDS_SPEECH_SECONDS:
             return
         log.warning(
             "server has not answered for %.1fs while audio was flowing — reconnecting",
-            now - self._last_event_at,
+            quiet_for,
         )
         self._recovering = True
         task = asyncio.create_task(self._rebuild_session(), name="recover")
@@ -464,6 +488,7 @@ class Daemon:
     async def _rebuild_session(self) -> None:
         try:
             self._emit("reconnect", "session stopped responding")
+            self._speech_chunks = 0
             await self.stop_session(keep_audio=True)
             await self.start_session()
         finally:
@@ -472,7 +497,7 @@ class Daemon:
     async def _on_event(self, event: dict) -> None:
         kind = event.get("type", "")
         # Any event at all means the far end is still processing what we send.
-        self._last_event_at = asyncio.get_running_loop().time()
+
 
         if kind == "input_audio_buffer.speech_started":
             # Barge-in. Drop what is queued for the speakers and stop the model
@@ -579,9 +604,6 @@ class Daemon:
             return {"ok": False, "error": message}
 
         self.session = session
-        # Start the watchdog's clock now: at zero it would read a brand-new
-        # session as one that has been silent since the epoch.
-        self._last_event_at = asyncio.get_running_loop().time()
         self.brain.reset()
         self.gate.reset()
         self.autogain.reset()

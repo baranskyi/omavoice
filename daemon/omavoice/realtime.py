@@ -165,6 +165,8 @@ class RealtimeSession:
         self._await_first_turn = True
         self.sent_events = 0
         self._warned_no_socket = False
+        # Loop time of the last frame from the server, of any kind.
+        self.last_activity = 0.0
 
     @property
     def awaiting_first_turn(self) -> bool:
@@ -182,6 +184,7 @@ class RealtimeSession:
         url = f"{WS_URL}?model={self.cfg.model}"
         log.info("connecting to %s", self.cfg.model)
         self._await_first_turn = True
+        self.last_activity = asyncio.get_running_loop().time()
         self.sent_events = 0
         self._warned_no_socket = False
         self._ws = await websockets.connect(
@@ -339,6 +342,12 @@ class RealtimeSession:
 
     async def _handle(self, event: dict) -> None:
         kind = event.get("type", "")
+
+        # Every frame counts as a sign of life, deltas included. They are the
+        # only thing arriving during a long spoken answer, and leaving them out
+        # made a healthy session look silent for as long as the answer lasted —
+        # which the daemon's watchdog then cut off as a wedge.
+        self.last_activity = asyncio.get_running_loop().time()
 
         # Audio deltas are the hot path and are not worth logging.
         if kind in ("response.output_audio.delta", "response.audio.delta"):

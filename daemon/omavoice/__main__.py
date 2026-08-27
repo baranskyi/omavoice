@@ -229,8 +229,10 @@ class Daemon:
             # API" into a question with a byte offset for an answer.
             self._mic_dump.write(chunk)
         session = self.session
-        if self.backgrounded:
-            return
+        # Deliberately not checking `backgrounded`. Whether a window is on
+        # screen says nothing about whether someone is talking, and dropping
+        # audio because the panel is hidden made the panel the point instead of
+        # the conversation.
         if not (session and session.connected and self.state in ("listening", "speaking")):
             return
 
@@ -770,19 +772,20 @@ class Daemon:
             return await self.pause_session()
 
         if command == "background":
-            # Put the conversation in the background: the panel is going away
-            # but the agent keeps working and the answer still gets spoken.
+            # The panel goes away and nothing else changes. The microphone stays
+            # open, the conversation keeps going, answers are still spoken.
             #
-            # The microphone stops. A session that keeps listening with no
-            # window on screen is both a privacy problem and a billing one —
-            # and the reason to background this is to wait for an answer, not
-            # to keep talking at a panel you cannot see.
+            # This used to release the microphone, on the reasoning that a
+            # session listening with no window on screen is a privacy and a
+            # billing question. Both are real, and both are the person's to
+            # answer, not this program's: closing a window is not the same as
+            # ending a conversation, and having to reopen the panel to be heard
+            # made the panel the point instead of the talking. Q stops
+            # everything when stopping is what is wanted.
             if self.session is None:
                 return {"ok": True, "background": False}
             self.backgrounded = True
-            await self.mic.stop()
-            self.gate.reset()
-            self._emit("background", "listening paused")
+            self._emit("background", "listening in the background")
             self.server.broadcast({"type": "background", "background": True})
             return {"ok": True, "background": True}
 
@@ -790,8 +793,11 @@ class Daemon:
             if self.session is None:
                 return {"ok": True, "background": False}
             self.backgrounded = False
-            await self.mic.start()
-            self._emit("foreground", "listening resumed")
+            # Nothing was stopped, so nothing needs starting — except after a
+            # Q, which is the one thing that does release the microphone.
+            if self.paused:
+                return await self.start_session()
+            self._emit("foreground", "panel back")
             self.server.broadcast({"type": "background", "background": False})
             return {"ok": True, "background": False}
 

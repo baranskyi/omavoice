@@ -188,9 +188,9 @@ is live, a crossed out one means the daemon is not running.
 Closing the panel and ending the conversation are different things, and they
 live on different keys.
 
-- **`Esc` (and a click outside) sends it to the background.** The session stays
-  alive, the agent finishes what it started, and the answer is still spoken out
-  loud. This is for when the question turns out to be a long one and there is no
+- **`Esc` (and a click outside) sends it to the background.** Nothing stops: the
+  session stays alive, the microphone stays open, the agent finishes what it
+  started, and the answer is still spoken out loud. This is for when the question turns out to be a long one and there is no
   reason to sit in front of the panel while it is computed. The crystal in the
   bar keeps showing state — it pulses while the agent works.
 - **`Q` stops it.** The microphone is released and whatever the assistant was
@@ -211,10 +211,17 @@ All three are letters rather than chords: the panel takes the keyboard
 exclusively, so any system-wide combination assigned elsewhere would simply
 vanish here. `Ctrl+Space`, for one, is Omarchy's dictation key.
 
-**The microphone is off in the background.** A session that keeps listening to
-the room when its window is gone from the screen is both a privacy question and
-a billing question — and you minimise it to wait for an answer, not to talk into
-an invisible panel. Open it again and the microphone comes back.
+**Backgrounding changes nothing at all.** The microphone stays open, the
+conversation carries on, answers are still spoken. Hiding a window is not the
+same as ending a conversation, and it should not have to be explained which one
+you meant.
+
+An earlier version released the microphone here, reasoning that a session
+listening with no window on screen is a privacy question and a billing one.
+Both are real, and both belong to the person rather than to this program —
+having to reopen a panel in order to be heard made the panel the point instead
+of the talking. `Q` stops everything when stopping is what is wanted, and
+without forgetting the conversation.
 
 When you return you can see what happened while you were away: the daemon keeps
 the last fourteen waterfall lines and replays them to a newly opened panel along

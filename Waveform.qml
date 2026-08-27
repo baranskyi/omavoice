@@ -47,31 +47,10 @@ Item {
   // fixed here and only the lightness is borrowed from the theme, picked
   // against the background it will be drawn on. Green stays green in every
   // theme, and stays readable in all of them.
-  readonly property real themeLightness: {
-    const bg = Color.menu.background
-    const luminance = 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b
-    // Lighter than mid on a dark ground, darker than mid on a light one.
-    // Measured against both kinds of ground: these keep every state hue above
-    // a 4.5 contrast ratio, which a figure made of scattered dots needs more
-    // than solid text does.
-    return luminance < 0.5 ? 0.62 : 0.32
-  }
+  StateHues { id: hues }
 
-  readonly property color stateColor: {
-    switch (voiceState) {
-    // Ready, and listening: green, the one colour nobody has to be taught.
-    case "listening": return Qt.hsla(0.35, 0.52, root.themeLightness, 1)
-    // Working. Sea green — related to the ready colour, plainly not it, and
-    // cool enough to read as waiting rather than as attention.
-    case "thinking":  return Qt.hsla(0.47, 0.55, root.themeLightness, 1)
-    // Broken.
-    case "error":     return Qt.hsla(0.99, 0.62, root.themeLightness, 1)
-    // Speaking keeps the theme's own accent: this is the assistant's turn, and
-    // the desk it is sitting on should still be recognisable.
-    case "speaking":  return root.accent
-    default:          return Qt.hsla(0.35, 0.34, root.themeLightness, 1)
-    }
-  }
+  readonly property color stateColor:
+    hues.colorFor(root.voiceState, Color.menu.background, root.accent)
 
   // --- barge-in ---------------------------------------------------------------
   // Pulsed when the person talks over the assistant. Not a colour change — the

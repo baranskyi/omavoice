@@ -180,8 +180,20 @@ all.
 | Make it say a phrase | `omavoice-ctl say "..."` — for testing echo with nobody in the room |
 | Inspect the state | `omavoice-ctl status` · `make logs` |
 
-The bar icon is an indicator: a microphone in the theme accent means the session
-is live, a crossed out one means the daemon is not running.
+### The bar says when it can hear you
+
+The crystal and the word beside it glow while the microphone is open, and only
+then. Passive, they sit quietly in the theme's own foreground; live, they turn
+the same green the panel uses and breathe.
+
+This matters more than it looks. Backgrounding stops nothing, so a hidden panel
+still means an open microphone, and the bar is then the only thing left that
+can say so. A steady light in a bar full of steady icons stops being noticed
+within a day — which is why this one moves.
+
+It is wired to the microphone rather than to the panel: listening, working and
+speaking all glow, because the microphone is open in all three. After `Q` it
+goes out, because that is the one thing that closes it.
 
 ### Background and ending
 

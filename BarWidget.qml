@@ -8,6 +8,7 @@ pragma ComponentBehavior: Bound
 // through the host, the same path the hotkey takes.
 
 import QtQuick
+import QtQuick.Effects
 import qs.Commons
 import qs.Ui
 
@@ -26,13 +27,37 @@ BarWidget {
   }
 
 
+  StateHues { id: hues }
+
+  // Whether the microphone is open. Not "is the panel on screen" — hiding the
+  // panel stops nothing, so the bar is the only thing left that can say a
+  // microphone is live, and it had better say it.
+  readonly property bool micOpen: hues.microphoneIsOpen(root.voiceState)
+
+  readonly property color barGround: root.bar && root.bar.barBackground
+    ? root.bar.barBackground
+    : Color.background
+
   readonly property color tint: {
-    switch (voiceState) {
-    case "listening": return Color.accent
-    case "speaking": return Color.accent
-    case "error": return Color.urgent
-    default: return bar ? bar.barForeground : Color.foreground
-    }
+    if (root.voiceState === "error") return Color.urgent
+    if (!root.micOpen) return root.bar ? root.bar.barForeground : Color.foreground
+    // The same greens the panel uses, so one fact has one colour.
+    return hues.colorFor(root.voiceState, root.barGround, Color.accent)
+  }
+
+  // The privacy light. It breathes rather than sitting still, because a steady
+  // glow in a bar full of steady icons stops being noticed within a day — and
+  // the whole point is that it should still be noticed on the hundredth.
+  property real glow: 0
+
+  NumberAnimation on glow {
+    running: root.micOpen
+    from: 0.45
+    to: 1.0
+    duration: 1400
+    easing.type: Easing.InOutSine
+    loops: Animation.Infinite
+    onRunningChanged: if (!running) root.glow = 0
   }
 
   // Ticks only while the agent is out, which is the one state worth counting:
@@ -116,6 +141,20 @@ BarWidget {
       else root.togglePanel()
     }
 
+    // The glow itself: a coloured shadow with no offset, which is what a halo
+    // is. Drawn from the icon's own shape, so it follows the crystal rather
+    // than sitting behind it as a disc.
+    layer.enabled: root.micOpen
+    layer.effect: MultiEffect {
+      shadowEnabled: true
+      shadowColor: root.tint
+      shadowBlur: 1.0
+      shadowScale: 1.3
+      shadowHorizontalOffset: 0
+      shadowVerticalOffset: 0
+      shadowOpacity: root.glow
+    }
+
     SequentialAnimation on opacity {
       running: root.voiceState === "thinking"
       loops: Animation.Infinite
@@ -135,6 +174,21 @@ BarWidget {
     color: root.tint
     font.family: root.bar ? root.bar.fontFamily : Style.font.family
     font.pixelSize: Style.font.body
+
+    // The word glows with the icon. Two marks saying the same thing is not
+    // redundancy here: whichever one the eye lands on, it says the microphone
+    // is open.
+    layer.enabled: root.micOpen
+    layer.effect: MultiEffect {
+      shadowEnabled: true
+      shadowColor: root.tint
+      shadowBlur: 0.9
+      shadowScale: 1.15
+      shadowHorizontalOffset: 0
+      shadowVerticalOffset: 0
+      shadowOpacity: root.glow * 0.85
+    }
+
     TapHandler { onTapped: root.togglePanel() }
   }
 }

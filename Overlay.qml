@@ -199,9 +199,17 @@ Item {
       anchors.top: parent.top
       anchors.topMargin: Style.space(64)
       width: Style.space(560)
+      // Grows with its content up to a cap, past which the middle scrolls.
+      // The cap used to apply to the card alone while the content kept its
+      // full height underneath, so anything taller simply painted over the
+      // desktop below the card.
       height: Math.min(
         Style.space(620),
-        body.implicitHeight + card.contentTopInset + card.contentBottomInset
+        card.contentTopInset + card.contentBottomInset
+          + head.implicitHeight
+          + (middle.implicitHeight > 0 ? Style.spacing.panelGap + middle.implicitHeight : 0)
+          + (actions.visible ? Style.spacing.panelGap + actions.implicitHeight : 0)
+          + Style.spacing.panelGap + footer.height
       )
       radius: Style.cornerRadius
       color: Color.menu.background
@@ -220,6 +228,8 @@ Item {
         anchors.rightMargin: card.contentRightInset
         anchors.bottomMargin: card.contentBottomInset
         anchors.leftMargin: card.contentLeftInset
+        // Belt and braces: nothing inside the card may ever paint outside it.
+        clip: true
         focus: true
         Keys.priority: Keys.BeforeItem
         Keys.onPressed: function (event) {
@@ -251,8 +261,10 @@ Item {
           }
         }
 
+        // Fixed head. The waveform and the status line are what the panel is;
+        // they stay put while the answer scrolls underneath them.
         Column {
-          id: body
+          id: head
           anchors.top: parent.top
           anchors.left: parent.left
           anchors.right: parent.right
@@ -338,33 +350,142 @@ Item {
 
             }
           }
+        }
 
-          // --- the waterfall ----------------------------------------------
-          EventLog {
-            width: parent.width
-            visible: client.events.count > 0
-            model: client.events
-            pendingSince: client.pendingSince
-            accent: Color.accent
-            base: Color.menu.text
-            urgent: Color.urgent
+        // --- footer --------------------------------------------------------
+        // Chrome, pinned to the card rather than riding at the end of the
+        // content. It used to sit in one long column with everything else,
+        // which is how it ended up painted below the card's edge and onto the
+        // desktop as soon as an answer arrived with action buttons attached.
+        //
+        // The gear sits here, away from the agent badge: it configures the
+        // whole plugin, not the backend it happened to be standing next to.
+        Item {
+          id: footer
+          anchors.bottom: parent.bottom
+          anchors.left: parent.left
+          anchors.right: parent.right
+          height: Math.max(hint.implicitHeight, gear.implicitHeight)
+
+          Text {
+            id: hint
+            anchors.left: parent.left
+            anchors.right: gear.left
+            anchors.rightMargin: Style.spaceReal(8)
+            anchors.verticalCenter: parent.verticalCenter
+            text: client.connected
+              ? "Esc — background · I — interrupt · N — new · Q — end"
+              : "Start the daemon:  systemctl --user start omavoice"
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Color.menu.text
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+            opacity: 0.35
           }
 
-          PanelSeparator {
-            width: parent.width
-            visible: client.markdown !== "" || client.assistantText !== ""
+          Text {
+            id: gear
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: "\u2699"
+            textFormat: Text.PlainText
+            color: root.settingsOpen ? Color.accent : Color.menu.text
+            opacity: root.settingsOpen ? 1 : (gearHover.hovered ? 0.9 : 0.4)
+            font.family: Style.font.family
+            font.pixelSize: Style.font.subtitle
+
+            Behavior on opacity { NumberAnimation { duration: 140 } }
+
+            HoverHandler { id: gearHover }
+            TapHandler { onTapped: root.settingsOpen = true }
+          }
+        }
+
+        // --- buttons ------------------------------------------------------
+        Flow {
+          id: actions
+          // Actions stay reachable. Inside the scroller they fell below the
+          // fold the moment an answer was long enough to scroll — visible
+          // only to someone who thought to scroll for them.
+          anchors.bottom: footer.top
+          anchors.bottomMargin: visible ? Style.spacing.panelGap : 0
+          anchors.left: parent.left
+          anchors.right: parent.right
+          spacing: Style.spacing.sm
+          visible: (client.links && client.links.length > 0) || (client.files && client.files.length > 0)
+
+          Repeater {
+            model: client.links
+            Button {
+              required property var modelData
+              text: String(modelData.label || "Ссылка")
+              iconText: "↗"
+              tooltipText: String(modelData.url || "")
+              foreground: Color.menu.text
+              accent: Color.accent
+              fontFamily: Style.font.family
+              bordered: true
+              onClicked: root.openUrl(modelData.url)
+            }
           }
 
-          // --- the answer --------------------------------------------------
-          Flickable {
-            width: parent.width
-            height: Math.min(Style.space(240), answer.implicitHeight)
-            contentHeight: answer.implicitHeight
-            clip: true
-            interactive: contentHeight > height
-            visible: answer.text !== ""
-            boundsBehavior: Flickable.StopAtBounds
+          Repeater {
+            model: client.files
+            Button {
+              required property var modelData
+              text: String(modelData.label || "Файл")
+              iconText: "\udb80\ude14"  // file, as a surrogate pair
+              tooltipText: String(modelData.path || "")
+              foreground: Color.menu.text
+              accent: Color.accent
+              fontFamily: Style.font.family
+              bordered: true
+              onClicked: root.openPath(modelData.path)
+            }
+          }
+        }
 
+        // The one scrolling surface in the panel. Everything that can grow
+        // without a bound — the waterfall, the answer, the buttons — lives in
+        // here and is clipped to whatever room is left between head and
+        // footer. One scroller rather than several: nested Flickables fight
+        // each other for the wheel, and the answer used to have its own.
+        Flickable {
+          id: scroller
+          anchors.top: head.bottom
+          anchors.topMargin: Style.spacing.panelGap
+          anchors.bottom: actions.top
+          anchors.bottomMargin: Style.spacing.panelGap
+          anchors.left: parent.left
+          anchors.right: parent.right
+          contentHeight: middle.implicitHeight
+          clip: true
+          interactive: contentHeight > height
+          boundsBehavior: Flickable.StopAtBounds
+
+          Column {
+            id: middle
+            width: scroller.width
+            spacing: Style.spacing.panelGap
+
+            // --- the waterfall ----------------------------------------------
+            EventLog {
+              width: parent.width
+              visible: client.events.count > 0
+              model: client.events
+              pendingSince: client.pendingSince
+              accent: Color.accent
+              base: Color.menu.text
+              urgent: Color.urgent
+            }
+
+            PanelSeparator {
+              width: parent.width
+              visible: client.markdown !== "" || client.assistantText !== ""
+            }
+
+            // --- the answer --------------------------------------------------
             Text {
               id: answer
               width: parent.width
@@ -377,91 +498,52 @@ Item {
               textFormat: client.markdown !== "" ? Text.MarkdownText : Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text
-              font.family: Style.font.family
+              // The concrete family, not the "monospace" alias every other
+              // label uses. Markdown is drawn through a QTextDocument, which
+              // re-matches a font per style run; on the alias the bold runs
+              // find no bold face and land on a different family altogether,
+              // so a line like **Omarchy:** 4.0.1-1 came out in two fonts.
+              font.family: Style.font.resolvedFamily
               font.pixelSize: Style.font.body
               onLinkActivated: function (link) { root.openUrl(link) }
             }
-          }
 
-          // --- buttons ------------------------------------------------------
-          Flow {
-            width: parent.width
-            spacing: Style.spacing.sm
-            visible: (client.links && client.links.length > 0) || (client.files && client.files.length > 0)
-
-            Repeater {
-              model: client.links
-              Button {
-                required property var modelData
-                text: String(modelData.label || "Ссылка")
-                iconText: "↗"
-                tooltipText: String(modelData.url || "")
-                foreground: Color.menu.text
-                accent: Color.accent
-                fontFamily: Style.font.family
-                bordered: true
-                onClicked: root.openUrl(modelData.url)
-              }
-            }
-
-            Repeater {
-              model: client.files
-              Button {
-                required property var modelData
-                text: String(modelData.label || "Файл")
-                iconText: "\udb80\ude14"  // file, as a surrogate pair
-                tooltipText: String(modelData.path || "")
-                foreground: Color.menu.text
-                accent: Color.accent
-                fontFamily: Style.font.family
-                bordered: true
-                onClicked: root.openPath(modelData.path)
-              }
-            }
-          }
-
-          // --- footer --------------------------------------------------------
-          // The gear sits here, away from the agent badge: it configures the
-          // whole plugin, not the backend it happened to be standing next to.
-          Item {
-            width: parent.width
-            height: Math.max(hint.implicitHeight, gear.implicitHeight)
-
-            Text {
-              id: hint
-              anchors.left: parent.left
-              anchors.right: gear.left
-              anchors.rightMargin: Style.spaceReal(8)
-              anchors.verticalCenter: parent.verticalCenter
-              text: client.connected
-                ? "Esc — background · I — interrupt · N — new · Q — end"
-                : "Start the daemon:  systemctl --user start omavoice"
-              textFormat: Text.PlainText
-              wrapMode: Text.Wrap
-              color: Color.menu.text
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              opacity: 0.35
-            }
-
-            Text {
-              id: gear
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              text: "\u2699"
-              textFormat: Text.PlainText
-              color: root.settingsOpen ? Color.accent : Color.menu.text
-              opacity: root.settingsOpen ? 1 : (gearHover.hovered ? 0.9 : 0.4)
-              font.family: Style.font.family
-              font.pixelSize: Style.font.subtitle
-
-              Behavior on opacity { NumberAnimation { duration: 140 } }
-
-              HoverHandler { id: gearHover }
-              TapHandler { onTapped: root.settingsOpen = true }
-            }
           }
         }
+
+        // The clip cuts a line in half when there is more below it, and a
+        // hard edge mid-glyph reads as a rendering fault rather than as an
+        // invitation to scroll. A short fade in the card's own colour says
+        // which of the two it is. Drawn after the Flickable so it sits over
+        // the text, and only while there is something to scroll to.
+        Rectangle {
+          id: fadeTop
+          readonly property color bg: Color.menu.background
+          anchors.left: scroller.left
+          anchors.right: scroller.right
+          anchors.top: scroller.top
+          height: Style.space(20)
+          visible: scroller.contentHeight > scroller.height && !scroller.atYBeginning
+          gradient: Gradient {
+            GradientStop { position: 0.0; color: fadeTop.bg }
+            GradientStop { position: 1.0; color: Qt.rgba(fadeTop.bg.r, fadeTop.bg.g, fadeTop.bg.b, 0) }
+          }
+        }
+
+        Rectangle {
+          id: fadeBottom
+          readonly property color bg: Color.menu.background
+          anchors.left: scroller.left
+          anchors.right: scroller.right
+          anchors.bottom: scroller.bottom
+          height: Style.space(20)
+          visible: scroller.contentHeight > scroller.height && !scroller.atYEnd
+          gradient: Gradient {
+            GradientStop { position: 0.0; color: Qt.rgba(fadeBottom.bg.r, fadeBottom.bg.g, fadeBottom.bg.b, 0) }
+            GradientStop { position: 1.0; color: fadeBottom.bg }
+          }
+        }
+
       }
     }
   }

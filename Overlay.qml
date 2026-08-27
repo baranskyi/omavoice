@@ -121,6 +121,9 @@ Item {
 
   Client {
     id: client
+    // Felt, not read: the figure buzzes the moment the assistant is talked
+    // over, before the state has caught up.
+    onBarged: wave.bargeIn()
     // Both commands are re-sent on connect, not just at open(): the socket
     // connects asynchronously, so anything sent from open() lands before
     // there is a socket to send it on and is silently dropped. That is what
@@ -287,7 +290,9 @@ Item {
               voiceState: client.connected ? client.voiceState : "error"
               level: client.level
               bands: client.bands
-              accent: client.voiceState === "error" || !client.connected ? Color.urgent : Color.accent
+              // Only the speaking colour comes from the theme now; the states
+              // that have to be recognised at a glance carry their own hue.
+              accent: Color.accent
               dim: Color.menu.text
             }
           }

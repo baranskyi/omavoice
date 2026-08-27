@@ -37,6 +37,49 @@ Item {
   property color accent: Color.accent
   property color dim: Color.muted
 
+  // --- state colour ----------------------------------------------------------
+  //
+  // The figure says what the assistant is doing before any word does, so the
+  // states that matter get a hue of their own: ready, working, broken.
+  //
+  // A theme cannot be asked for "green" — it guarantees an accent and nothing
+  // else, and on a light theme its accent may be nearly white. So the hue is
+  // fixed here and only the lightness is borrowed from the theme, picked
+  // against the background it will be drawn on. Green stays green in every
+  // theme, and stays readable in all of them.
+  readonly property real themeLightness: {
+    const bg = Color.menu.background
+    const luminance = 0.2126 * bg.r + 0.7152 * bg.g + 0.0722 * bg.b
+    // Lighter than mid on a dark ground, darker than mid on a light one.
+    // Measured against both kinds of ground: these keep every state hue above
+    // a 4.5 contrast ratio, which a figure made of scattered dots needs more
+    // than solid text does.
+    return luminance < 0.5 ? 0.62 : 0.32
+  }
+
+  readonly property color stateColor: {
+    switch (voiceState) {
+    // Ready, and listening: green, the one colour nobody has to be taught.
+    case "listening": return Qt.hsla(0.35, 0.52, root.themeLightness, 1)
+    // Working. Sea green — related to the ready colour, plainly not it, and
+    // cool enough to read as waiting rather than as attention.
+    case "thinking":  return Qt.hsla(0.47, 0.55, root.themeLightness, 1)
+    // Broken.
+    case "error":     return Qt.hsla(0.99, 0.62, root.themeLightness, 1)
+    // Speaking keeps the theme's own accent: this is the assistant's turn, and
+    // the desk it is sitting on should still be recognisable.
+    case "speaking":  return root.accent
+    default:          return Qt.hsla(0.35, 0.34, root.themeLightness, 1)
+    }
+  }
+
+  // --- barge-in ---------------------------------------------------------------
+  // Pulsed when the person talks over the assistant. Not a colour change — the
+  // state is about to change on its own — but a physical one: the figure buzzes
+  // like a plucked wire and settles. It reads as "heard you, stopping".
+  property real buzz: 0
+  function bargeIn() { root.buzz = 1.0 }
+
   implicitWidth: Style.spaceReal(440)
   implicitHeight: Style.spaceReal(120)
 
@@ -85,6 +128,9 @@ Item {
         if (root.thinkHead > 1.4) root.thinkHead = -1.4
       }
 
+      if (root.buzz > 0.001) root.buzz *= 0.90
+      else root.buzz = 0
+
       canvas.requestPaint()
     }
   }
@@ -116,8 +162,14 @@ Item {
       const isError = root.voiceState === "error"
       const thinking = root.voiceState === "thinking"
 
-      const col = isError ? root.dim : root.accent
+      const col = root.stateColor
       const cr = col.r, cg = col.g, cb = col.b
+
+      // A broken session should look broken. Horizontal slices slip sideways
+      // and the points scatter — the picture of a signal that has lost its
+      // footing, rather than a calm figure in a different colour.
+      const glitch = isError ? 1 : 0
+      const buzz = root.buzz
 
       // The figure has to be worth looking at in silence too — a listening
       // panel that shows a flat line reads as broken. So it keeps real
@@ -182,8 +234,22 @@ Item {
             y *= 0.72 + radial * 0.34
           }
 
-          const amp = env * (idleAmp + lvl * gain) * reach
-          const px = pad + u * span
+          let amp = env * (idleAmp + lvl * gain) * reach
+
+          // The buzz: a fine tremble at a frequency nothing else in the figure
+          // uses, loudest in the middle and gone within a breath.
+          if (buzz > 0) {
+            amp *= 1 + buzz * 0.45 * Math.sin(s * 47.0 + t * 26.0 + L)
+          }
+
+          let px = pad + u * span
+          if (glitch) {
+            // Slices, not noise: a band of the figure jumps as a piece.
+            const slice = Math.floor(u * 7) + Math.floor(t * 3)
+            const jump = ((slice * 2654435761) % 1000) / 1000 - 0.5
+            px += jump * span * 0.055
+            amp *= 0.55 + Math.abs(jump) * 1.6
+          }
 
           for (let m = 0; m < mirror.length; m++) {
             const arm = mirror[m]

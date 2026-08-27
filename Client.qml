@@ -45,6 +45,8 @@ Item {
   // Which microphone the daemon is using, what it could use, and whether the
   // choice is being made for us. Empty `audioInput` means "follow the system",
   // which is the default and picks a headset when one is worn.
+  signal barged()
+
   property var audioSources: []
   property string audioInput: ""
   property string audioResolved: ""
@@ -78,6 +80,10 @@ Item {
     } else if (kind === "agent") {
       detail = String(message.backend || "")
     }
+
+    // The daemon reports a barge-in as an event like any other; the panel wants
+    // it as a moment, so it can be felt rather than read.
+    if (kind === "barge") root.barged()
 
     if (kind === "agent") root.pendingSince = Date.now()
     else if (kind === "result" || kind === "error") root.pendingSince = 0

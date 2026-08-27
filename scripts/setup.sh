@@ -11,6 +11,7 @@ PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 VENV="${XDG_DATA_HOME:-$HOME/.local/share}/omavoice/venv"
 UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/omavoice.service"
 ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omavoice/env"
+KEY_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/omavoice/key"
 PW_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/pipewire/pipewire.conf.d"
 PW_CONF="$PW_DIR/99-omavoice-echo-cancel.conf"
 
@@ -66,19 +67,35 @@ systemctl --user daemon-reload
 note "installed $UNIT"
 
 # --- 3. API key --------------------------------------------------------------
+# In a file of its own, which systemd does not load. An environment variable is
+# not a secret on a shared UID: every child process inherits it, and
+# /proc/<pid>/environ keeps the copy the process started with for anything
+# running as the same user to read — including the agent this daemon spawns on
+# every question.
 say "OpenAI key"
+mkdir -p "$(dirname "$KEY_FILE")"
+if [[ -f "$KEY_FILE" ]]; then
+  chmod 600 "$KEY_FILE"
+  note "kept your existing $KEY_FILE"
+else
+  install -m 600 /dev/null "$KEY_FILE"
+  note "created $KEY_FILE (mode 600) — it is empty"
+  note "the Realtime API needs a paid key: https://platform.openai.com/api-keys"
+fi
+
 if [[ -f "$ENV_FILE" ]]; then
-  note "kept your existing $ENV_FILE"
+  chmod 600 "$ENV_FILE"
+  if grep -q '^OPENAI_API_KEY=' "$ENV_FILE"; then
+    note "$ENV_FILE still holds a key from an older install."
+    note "Save it again from the panel's settings and it will move to $KEY_FILE."
+  fi
 else
   mkdir -p "$(dirname "$ENV_FILE")"
   install -m 600 /dev/null "$ENV_FILE"
   {
-    echo '# The Realtime API bills per audio token and only accepts a paid API key.'
-    echo '# A ChatGPT subscription does not work here. Get one at:'
-    echo '#   https://platform.openai.com/api-keys'
-    echo 'OPENAI_API_KEY='
+    echo '# Settings only. The API key lives in the file next to this one, which'
+    echo '# systemd does not load into the environment.'
   } >> "$ENV_FILE"
-  note "created $ENV_FILE (mode 600) — it is empty"
 fi
 
 # --- 4. Echo cancellation ----------------------------------------------------

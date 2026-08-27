@@ -17,6 +17,7 @@ an abstraction over what is already just JSON frames over a socket.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import base64
 import json
 import logging
@@ -254,6 +255,23 @@ class RealtimeSession:
         self._await_first_turn = False
         await self._configure()
         await self._send({"type": "response.create"})
+
+    async def cancel_tools(self) -> None:
+        """Abandon every question the agent is still working on.
+
+        Cancelling the task is what actually stops an answer, and it has to
+        happen before the tool result is sent: once `function_call_output` and
+        `response.create` are on the wire, the model will speak, and no amount
+        of muting afterwards unsays it. Cancellation reaches the agent
+        subprocess through the brain, which reaps it.
+        """
+        tasks = list(self._tools.values())
+        self._tools.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
 
     async def close(self) -> None:
         for task in self._tools.values():

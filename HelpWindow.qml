@@ -271,10 +271,11 @@ Item {
               }
               KeyRow {
                 key: "Q"
-                what: "Stops. The microphone is released and whatever the "
-                    + "assistant was saying is cut off — but the conversation "
-                    + "is kept, and opening the panel again picks it up where "
-                    + "it left off."
+                what: "Stops. The microphone is released, whatever the "
+                    + "assistant was saying is cut off, and a question the "
+                    + "agent is still working on is abandoned — but the "
+                    + "conversation is kept, and opening the panel again picks "
+                    + "it up where it left off."
               }
               KeyRow {
                 key: "N"

@@ -83,7 +83,7 @@ bash ~/.config/omarchy/plugins/io.github.baranskyi.omavoice/scripts/setup.sh
 `omarchy plugin add` only puts the QML in place. `setup.sh` does the rest: it
 creates the virtualenv, installs the systemd user unit, drops in the echo
 cancellation config, and creates an empty key file at
-`~/.config/omavoice/env` with mode `600`. It never overwrites a config you
+`~/.config/omavoice/key` with mode `600`, in a file of its own. It never overwrites a config you
 already have — if one is there and differs, it says so and leaves it alone.
 
 Then three steps it deliberately does not do for you:
@@ -409,8 +409,15 @@ draw a widget. Plainly, what it does:
   wrong, and transcription adds its own error on top.
 - **Requests that consist of a destructive command** (`rm -rf`, `mkfs`,
   `shutdown`) never reach the agent.
-- **The key** sits in `~/.config/omavoice/env` with mode `600` and is read
-  only by the unit — it is not visible to the rest of your processes.
+- **The key** lives in `~/.config/omavoice/key`, mode `600`, in a file of its
+  own that systemd does not load. It is read once by the daemon and removed
+  from the process environment immediately, so no child inherits it — not the
+  agent, not `pw-record`, not `pactl`. That last part matters more than it
+  sounds: an environment variable is not a secret on a shared UID, because
+  `/proc/<pid>/environ` keeps the copy a process started with and anything
+  running as the same user can read it. An earlier version passed the key in
+  through the environment and claimed it was visible only to the unit, which
+  was not true.
 - **Links and paths from an answer** are opened through an argv vector with a
   scheme check: their source is a retelling of untrusted content.
 - **Images are stripped out of markdown** so the shell never fetches them.

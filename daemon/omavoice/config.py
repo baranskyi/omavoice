@@ -88,7 +88,13 @@ class Config:
     output_target: str = field(default_factory=lambda: os.environ.get("OMAVOICE_OUTPUT", ""))
 
     # --- realtime ----------------------------------------------------------
-    api_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", ""))
+    # Read from a file of its own rather than from the environment, and never
+    # put back. An environment variable is not a secret on a shared UID: it is
+    # inherited by every child, and /proc/<pid>/environ keeps the copy the
+    # process started with for anything running as the same user to read —
+    # including the agent this daemon spawns on every question. The key file
+    # is mode 600 and is opened only here.
+    api_key: str = field(default_factory=lambda: read_api_key())
     model: str = field(default_factory=lambda: os.environ.get("OMAVOICE_MODEL", "gpt-realtime-2.1-mini"))
     voice: str = field(default_factory=lambda: os.environ.get("OMAVOICE_VOICE", "marin"))
     transcription_model: str = field(
@@ -155,28 +161,83 @@ def env_file() -> Path:
     return Path(base) / "omavoice" / "env"
 
 
-def save_api_key(key: str) -> None:
-    """Write the key into the env file, preserving whatever else is in it."""
-    path = env_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
+def key_file() -> Path:
+    """Where the credential lives, alone.
 
-    lines: list[str] = []
-    replaced = False
-    if path.exists():
-        for line in path.read_text().splitlines():
+    Deliberately not the env file: systemd loads that one into the daemon's
+    environment, which is exactly what must not happen to a key.
+    """
+    base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
+    return Path(base) / "omavoice" / "key"
+
+
+def read_api_key() -> str:
+    """The key, from its file, with the older locations still honoured.
+
+    Two of them, in order of how much they should be trusted:
+      1. the key file, which nothing else reads;
+      2. OPENAI_API_KEY in the environment, which is how it used to arrive and
+         how someone running the daemon by hand may still pass it;
+      3. the env file, where setup.sh used to put it — read directly here so an
+         existing installation keeps working without the key going through
+         systemd into the environment.
+    """
+    path = key_file()
+    try:
+        key = path.read_text().strip()
+        if key:
+            return key
+    except OSError:
+        pass
+
+    from_env = os.environ.get("OPENAI_API_KEY", "").strip()
+    if from_env:
+        return from_env
+
+    try:
+        for line in env_file().read_text().splitlines():
+            line = line.strip()
             if line.startswith("OPENAI_API_KEY="):
-                lines.append(f"OPENAI_API_KEY={key}")
-                replaced = True
-            else:
-                lines.append(line)
-    if not replaced:
-        lines.append(f"OPENAI_API_KEY={key}")
+                return line.split("=", 1)[1].strip().strip("\'\"")
+    except OSError:
+        pass
+    return ""
+
+
+def save_api_key(key: str) -> None:
+    """Write the key to its own file, and take it out of the env file.
+
+    Moving it is part of saving it: an installation that predates the split
+    still has the key in the env file, which systemd loads into the daemon's
+    environment. Leaving a copy there would mean the credential is protected
+    only until someone reads /proc.
+    """
+    path = key_file()
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     # Written 600 from the start rather than chmod'ed after: for the moment
     # between creating and tightening it, the key would be world-readable.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w") as handle:
-        handle.write("\n".join(lines) + "\n")
+        handle.write(key + "\n")
+    os.chmod(path, 0o600)
+
+    _strip_key_from_env_file()
+
+
+def _strip_key_from_env_file() -> None:
+    """Remove any OPENAI_API_KEY line from the settings file."""
+    path = env_file()
+    try:
+        lines = path.read_text().splitlines()
+    except OSError:
+        return
+    kept = [line for line in lines if not line.strip().startswith("OPENAI_API_KEY=")]
+    if len(kept) == len(lines):
+        return
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as handle:
+        handle.write("\n".join(kept).rstrip("\n") + "\n")
     os.chmod(path, 0o600)
 
 

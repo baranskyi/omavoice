@@ -19,6 +19,7 @@ thread, later asks resume it, so "и что там во втором файле?
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -110,6 +111,34 @@ def _coerce(raw: str) -> Answer:
     return Answer(spoken=spoken, markdown=markdown, links=_entries("links", "url"), files=_entries("files", "path"))
 
 
+async def _reap(proc: asyncio.subprocess.Process) -> None:
+    """Terminate, wait, and kill if it will not go.
+
+    Asking politely and walking away is not stopping a process: an agent that
+    ignores SIGTERM keeps running, and the caller has already forgotten about
+    it. Nothing here raises — this runs on paths that are themselves cleaning
+    up after a failure.
+    """
+    if proc.returncode is not None:
+        return
+    with contextlib.suppress(ProcessLookupError):
+        proc.terminate()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=3)
+        return
+    except asyncio.TimeoutError:
+        log.warning("agent ignored terminate, killing it")
+    except asyncio.CancelledError:
+        # Even while being cancelled, the child must not outlive us.
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        raise
+    with contextlib.suppress(ProcessLookupError):
+        proc.kill()
+    with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
+        await asyncio.wait_for(proc.wait(), timeout=2)
+
+
 class Brain:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -136,8 +165,8 @@ class Brain:
 
     async def cancel(self) -> None:
         proc = self._proc
-        if proc and proc.returncode is None:
-            proc.terminate()
+        if proc is not None:
+            await _reap(proc)
 
     @property
     def busy(self) -> bool:
@@ -180,8 +209,17 @@ class Brain:
         self._proc = proc
         try:
             out, err = await asyncio.wait_for(proc.communicate(stdin), timeout=self.cfg.brain_timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # Both paths used to leave the agent running. `communicate()` being
+            # cancelled does not touch the child, and the old `finally` dropped
+            # the handle before anything had a chance to kill it — so a timed
+            # out or interrupted question left a codex or claude process behind,
+            # untracked, still reading the filesystem and still being billed.
+            await _reap(proc)
+            raise
         finally:
-            self._proc = None
+            if self._proc is proc:
+                self._proc = None
         return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
     async def _ask_codex(self, query: str) -> Answer:

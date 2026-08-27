@@ -365,6 +365,11 @@ class Daemon:
 
     async def _on_audio(self, pcm: bytes) -> None:
         # Never awaits on the speaker: this runs inside the socket read loop.
+        if self.paused:
+            # A response already in flight when stop was pressed. The socket
+            # stays open on purpose, so its audio keeps arriving; playing it
+            # would make stop mean "stop in a moment".
+            return
         self._set_state("speaking")
         if self._voice_dump is not None:
             self._voice_dump.write(pcm)
@@ -400,7 +405,7 @@ class Daemon:
         # flip us to "speaking" the moment the first sample lands. Unless the
         # panel closed while the agent was working — then the session is gone
         # and claiming to listen would leave a live-looking mic icon in the bar.
-        if self.session is not None:
+        if self.session is not None and not self.paused:
             self._set_state("listening")
         return answer.spoken
 
@@ -674,6 +679,13 @@ class Daemon:
         await self.mic.stop()
         self._drop_queued_audio()
         await self.speaker.flush_now()
+        # The agent, not only the audio. Stopping the sound while a question is
+        # still being worked on meant the answer arrived a minute later and was
+        # spoken into a room where somebody had pressed stop.
+        with contextlib.suppress(Exception):
+            await self.session.cancel_tools()
+        with contextlib.suppress(Exception):
+            await self.brain.cancel()
         with contextlib.suppress(Exception):
             await self.session.cancel_response()
         self._set_state("idle")
@@ -828,9 +840,13 @@ class Daemon:
             self._drop_queued_audio()
             await self.speaker.flush_now()
             if self.session:
+                # Before cancel_response, and before the brain: killing only the
+                # subprocess left the tool task alive to report "the agent
+                # returned no answer", which was then sent back and spoken.
+                await self.session.cancel_tools()
                 await self.session.cancel_response()
             await self.brain.cancel()
-            if self.session:
+            if self.session and not self.paused:
                 self._set_state("listening")
             return {"ok": True}
 
@@ -1035,6 +1051,19 @@ def main() -> int:
     args = parser.parse_args()
 
     cfg = config.load()
+
+    # The key is read once and then removed from this process's environment, so
+    # that nothing started from here can inherit it. The daemon shells out to
+    # codex or claude on every question, and those read files and the web on
+    # instructions from a model — an agent that can print its own environment
+    # can print the billing credential, and prompt-injected content could ask
+    # it to. pw-record, pw-play and pactl inherited it too, for no reason at
+    # all.
+    #
+    # Done here rather than by passing env= to each subprocess, because that
+    # only protects the calls somebody remembered to change.
+    os.environ.pop("OPENAI_API_KEY", None)
+
     if args.backend:
         cfg.backend = args.backend
     if args.debug:

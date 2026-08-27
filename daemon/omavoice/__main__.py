@@ -109,9 +109,11 @@ class Daemon:
         # the gate substitutes digital silence for the rest of it, and we hand
         # the server a cleaner silence than the room ever produced — talking it
         # into ending a sentence the person is still in the middle of.
-        self._recovering = False
         self._speech_chunks = 0
         self._speech_since = 0.0
+        # True after a stop: socket open and the conversation intact, but
+        # nothing heard and nothing said.
+        self.paused = False
         self.autogain = AutoGain(chunk_ms=cfg.chunk_ms)
         self.devices: device_choice.Devices | None = None
         # Microphones that failed to produce audio while this daemon has been
@@ -458,7 +460,7 @@ class Daemon:
         all for six seconds, the connection is rebuilt. That costs a second and
         keeps the microphone, the speaker and the echo canceller untouched.
         """
-        if self.state != "listening" or self._recovering:
+        if self.state != "listening":
             return
         now = asyncio.get_running_loop().time()
         # Any sign of life resets the case being built against the session.
@@ -477,22 +479,18 @@ class Daemon:
         speaking_seconds = self._speech_chunks * self.cfg.chunk_ms / 1000
         if speaking_seconds < self._DEAF_NEEDS_SPEECH_SECONDS:
             return
+        # Reported, never acted on. Ending a conversation is the person's call
+        # and the far end's — never ours. Every automatic rebuild this made cost
+        # somebody a conversation that was going fine, and the one genuine wedge
+        # it caught was worth less than that.
         log.warning(
-            "server has not answered for %.1fs while audio was flowing — reconnecting",
+            "server has not answered for %.1fs while %.0fs of speech went out — "
+            "the connection may be wedged; N starts a fresh one",
             quiet_for,
+            speaking_seconds,
         )
-        self._recovering = True
-        task = asyncio.create_task(self._rebuild_session(), name="recover")
-        task.add_done_callback(_log_task_failure)
-
-    async def _rebuild_session(self) -> None:
-        try:
-            self._emit("reconnect", "session stopped responding")
-            self._speech_chunks = 0
-            await self.stop_session(keep_audio=True)
-            await self.start_session()
-        finally:
-            self._recovering = False
+        self._speech_chunks = 0
+        self._emit("error", "the connection has stopped answering — N starts over")
 
     async def _on_event(self, event: dict) -> None:
         kind = event.get("type", "")
@@ -578,7 +576,16 @@ class Daemon:
 
     async def start_session(self) -> dict:
         if self.session is not None:
-            return {"ok": True, "already": True}
+            if not self.paused:
+                return {"ok": True, "already": True}
+            # Back after a stop: the same conversation, listening again.
+            self.paused = False
+            self.gate.reset()
+            self.autogain.reset()
+            await self.mic.start()
+            self._set_state("listening")
+            self._emit("resume", "listening again")
+            return {"ok": True, "resumed": True}
 
         # A new session is a new conversation: nothing from the last one should
         # be replayed into the freshly opened panel. A previous failure clears
@@ -650,6 +657,28 @@ class Daemon:
             if self.session is session:
                 await self.stop_session()
 
+    async def pause_session(self) -> dict:
+        """Silence both directions and keep the conversation.
+
+        The Realtime API keeps a conversation on its connection and offers no
+        way to clear it, so closing the socket is the only way to forget — which
+        makes it the one thing that must never happen by accident.
+        """
+        if self.session is None:
+            return {"ok": True, "already": True}
+
+        self.paused = True
+        self.backgrounded = False
+        await self.mic.stop()
+        self._drop_queued_audio()
+        await self.speaker.flush_now()
+        with contextlib.suppress(Exception):
+            await self.session.cancel_response()
+        self._set_state("idle")
+        self.server.broadcast({"type": "background", "background": False})
+        self._emit("stop", "stopped — the conversation is kept")
+        return {"ok": True, "paused": True}
+
     async def stop_session(self, keep_audio: bool = False) -> dict:
         """Close the conversation. With keep_audio, leave the pipes running.
 
@@ -665,6 +694,7 @@ class Daemon:
         session, self.session = self.session, None
         task, self._session_task = self._session_task, None
         self.backgrounded = False
+        self.paused = False
 
         if not keep_audio:
             await self.mic.stop()
@@ -732,7 +762,12 @@ class Daemon:
             return await self.start_session()
 
         if command == "stop":
-            return await self.stop_session()
+            # Stop, not end. Everything audible halts — the microphone is
+            # released, whatever the assistant was saying is cut off — but the
+            # connection stays up, and with it the conversation. Coming back
+            # from a stop to an assistant that remembers nothing is not a stop,
+            # it is an erasure, and there is already a key for that.
+            return await self.pause_session()
 
         if command == "background":
             # Put the conversation in the background: the panel is going away

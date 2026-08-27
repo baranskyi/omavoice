@@ -253,7 +253,9 @@ Item {
             client.cancel()
             event.accepted = true
           } else if (event.key === Qt.Key_Q) {
-            // End it for real, as opposed to Escape which only steps away.
+            // Stops both directions and keeps the conversation. Escape steps
+            // away and lets the answer finish; this cuts it off. Neither forgets —
+            // that is N.
             root.endSession()
             event.accepted = true
           } else if (event.key === Qt.Key_N) {
@@ -383,7 +385,7 @@ Item {
             anchors.rightMargin: Style.spaceReal(8)
             anchors.verticalCenter: parent.verticalCenter
             text: client.connected
-              ? "Esc — background · I — interrupt · N — new · Q — end"
+              ? "Esc — background · I — interrupt · N — new · Q — stop"
               : "Start the daemon:  systemctl --user start omavoice"
             textFormat: Text.PlainText
             wrapMode: Text.Wrap

@@ -169,7 +169,7 @@ all.
 |---|---|
 | Open the panel | `SUPER+CTRL+M`, or click the crystal in the bar |
 | Send it to the background | `Esc`, a click outside the panel, or the same hotkey |
-| End the conversation | `Q` in the panel, or `omavoice-ctl stop` |
+| Stop, keeping the conversation | `Q` in the panel, or `omavoice-ctl stop` |
 | Interrupt an answer | `I` in the panel, or `omavoice-ctl cancel` |
 | Start a new conversation | `N` in the panel, or `omavoice-ctl reset` |
 | Settings | ⚙ in the panel, or `omarchy-shell io.github.baranskyi.omavoice settings` |
@@ -193,8 +193,17 @@ live on different keys.
   loud. This is for when the question turns out to be a long one and there is no
   reason to sit in front of the panel while it is computed. The crystal in the
   bar keeps showing state — it pulses while the agent works.
-- **`Q` ends it.** The session closes, the Realtime connection drops, everything
-  is released.
+- **`Q` stops it.** The microphone is released and whatever the assistant was
+  saying is cut off — but the connection stays up and so does the conversation.
+  Open the panel again and it picks up where it left off, remembering what was
+  said. Stopping is not forgetting; forgetting is `N`.
+
+Nothing else ends a session. The Realtime API keeps the conversation on its
+connection and offers no way to clear it, so closing the socket is the only way
+to forget — which makes it the one thing that must never happen on its own. A
+connection that goes quiet is reported, never rebuilt: an earlier version
+rebuilt it automatically and spent its time cutting short conversations that
+were going fine.
 - **`I` interrupts** an answer that is running long, without leaving the
   conversation.
 

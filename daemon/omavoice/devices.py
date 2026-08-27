@@ -51,6 +51,11 @@ class Devices:
     reason: str
     # A short line meant for the settings window rather than the log.
     summary: str = ""
+    # Where the microphone should go if the chosen one never speaks. A headset
+    # microphone node exists only while its card is in headset profile, and
+    # opening it is what asks for the switch — so the first attempt can lose
+    # that race, and a device can also disappear mid-session.
+    fallback_input: str = ""
 
     def describe(self) -> str:
         return f"in={self.input_target} out={self.output_target} ({self.reason})"
@@ -169,12 +174,22 @@ async def _headset_mic_for(sink: str) -> str:
     return ""
 
 
-async def resolve(configured_input: str, configured_output: str) -> Devices:
+async def resolve(
+    configured_input: str,
+    configured_output: str,
+    avoid: set[str] | None = None,
+) -> Devices:
     """Pick devices for one session.
 
     An explicit `OMAVOICE_INPUT` / `OMAVOICE_OUTPUT` always wins: someone who
     named a device meant it. Everything else is decided here.
+
+    `avoid` holds microphones that already failed to produce audio while this
+    daemon has been running. A Bluetooth headset whose HFP transport is broken
+    fails the same way every time, and rediscovering that at the start of every
+    conversation costs the person ten seconds of talking to nothing.
     """
+    avoid = avoid or set()
     if configured_input and configured_output:
         return Devices(
             configured_input,
@@ -190,6 +205,9 @@ async def resolve(configured_input: str, configured_output: str) -> Devices:
 
     if worn:
         own_mic = await _headset_mic_for(sink)
+        if own_mic in avoid:
+            log.info("skipping %s — it failed earlier in this session", own_mic)
+            own_mic = ""
         source = own_mic or await _default_source()
         detail = "its own microphone" if own_mic else "system default microphone"
         chosen = configured_input or source
@@ -199,6 +217,7 @@ async def resolve(configured_input: str, configured_output: str) -> Devices:
             True,
             f"headphones — {why}, {detail}, echo canceller not needed",
             f"{await _describe_source(chosen)} · headphones, echo cancellation off",
+            await _default_source(),
         )
 
     # Speakers. The canceller is only useful if it is actually loaded; without
@@ -212,6 +231,7 @@ async def resolve(configured_input: str, configured_output: str) -> Devices:
             False,
             f"speakers — {why}, routed through the echo canceller",
             "Speakers · echo cancellation on",
+            await _default_source(),
         )
 
     source = await _default_source()

@@ -1,6 +1,6 @@
 [project]
 name = "omavoice"
-version = "0.1.3"
+version = "0.1.4"
 description = "Voice assistant daemon for the Omarchy shell: OpenAI Realtime for speech, a local agent for answers"
 requires-python = ">=3.11"
 dependencies = [

@@ -113,6 +113,10 @@ class Daemon:
         self._recovering = False
         self.autogain = AutoGain(chunk_ms=cfg.chunk_ms)
         self.devices: device_choice.Devices | None = None
+        # Microphones that failed to produce audio while this daemon has been
+        # up. Remembered so a broken device is discovered once, not at the
+        # start of every conversation.
+        self._bad_inputs: set[str] = set()
         self._mic_dump = _open_dump(cfg.mic_dump)
         self._dump = _open_dump(cfg.dump_path)
         self._voice_dump = _open_dump(cfg.voice_dump)
@@ -556,15 +560,21 @@ class Daemon:
         # looks identical in every case, which is exactly why the substitution
         # used to be invisible — so say out loud what was chosen.
         self.devices = await device_choice.resolve(
-            self.cfg.input_target, self.cfg.output_target
+            self.cfg.input_target, self.cfg.output_target, avoid=self._bad_inputs
         )
         log.info("audio: %s", self.devices.describe())
         asyncio.create_task(self._broadcast_audio()).add_done_callback(_log_task_failure)
         self.mic.target = self.devices.input_target
+        self.mic.fallback_target = self.devices.fallback_input
+        self.mic.on_fault = self._on_mic_fault
         self.speaker.target = self.devices.output_target
 
-        await self.speaker.start()
+        # Microphone first. On a Bluetooth headset, opening the microphone is
+        # what asks WirePlumber to switch the card into its headset profile,
+        # and that switch tears down the A2DP sink — taking a player started
+        # ahead of it with it. Let the profile settle, then attach playback.
         await self.mic.start()
+        await self.speaker.start()
         if self._play_task is None:
             self._play_task = asyncio.create_task(self._play_pump(), name="playback")
         self._set_state("listening")
@@ -624,6 +634,18 @@ class Daemon:
         # "listening"; the guard in _on_tool_call keys off session being None,
         # which it now is.
         return {"ok": True}
+
+    def _on_mic_fault(self, message: str) -> None:
+        """A microphone problem, said where it can be seen.
+
+        The panel showing "listening" over a dead capture device was the single
+        most misleading thing this program has done.
+        """
+        log.warning("microphone: %s", message)
+        if self.devices and self.devices.input_target:
+            self._bad_inputs.add(self.devices.input_target)
+        self._emit("error", message)
+        self.server.broadcast({"type": "error", "message": message})
 
     async def _broadcast_audio(self) -> None:
         """Tell the panel what the audio path is and what else it could be.

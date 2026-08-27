@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import array
 import asyncio
+import contextlib
 import logging
 import math
 from collections.abc import Callable
@@ -342,7 +343,51 @@ def _pw_common(cfg: Config) -> list[str]:
 
 
 class Microphone:
-    """Reads fixed-size PCM chunks and hands them to a callback."""
+    """Reads fixed-size PCM chunks and hands them to a callback.
+
+    Keeps `pw-record` alive rather than assuming it stays that way. A capture
+    device can vanish under it mid-session — unplugging a dock, or a Bluetooth
+    headset whose microphone node only exists while the card is in its headset
+    profile and disappears when it flips back. Worse, a target that is not
+    there *yet* makes `pw-record` exit at once: opening a headset microphone is
+    itself what asks WirePlumber to switch the profile, so the first attempt can
+    lose a race with the switch it triggered.
+
+    That used to end the pump and nothing else. The session stayed open, the
+    panel said "listening", the meter sat still, and the assistant was deaf with
+    no line anywhere saying so — indistinguishable from a microphone that simply
+    heard nothing. So the process is restarted, and every one of these events is
+    on the record.
+    """
+
+    # Long enough to let a profile switch settle, short enough that the pause is
+    # a hiccup rather than a gap in the conversation.
+    RETRY_SECONDS = 0.6
+    # A stream can fail without stopping. A Bluetooth headset whose HFP
+    # transport is erroring — "SCO packet for unknown connection handle" in the
+    # kernel log — leaves pw-record alive and delivering a tenth of real time,
+    # which is silence to anyone listening and perfect health to a watchdog that
+    # only checks for death.
+    #
+    # Measured as a gap between chunks rather than a rate over a window. A
+    # window has to start somewhere, and one that spans a restart blames the new
+    # process for the old one's silence — which is how a working microphone came
+    # to be declared starving. Chunks arrive every 20 ms; two seconds without
+    # one is a stall by any reading.
+    SILENCE_TIMEOUT = 2.0
+    # Starting is not the same as stalling, and deserves more room. A capture
+    # opened right after the graph was rearranged — a Bluetooth profile switch,
+    # a device released a moment ago — can take seconds to produce its first
+    # frame, and killing it at two was how a perfectly good microphone kept
+    # being declared dead.
+    START_TIMEOUT = 6.0
+    # Two different situations, two different patiences. A device that has been
+    # working and then stumbles deserves several attempts — a dock waking up, a
+    # profile switching. A device that has not produced a single chunk since the
+    # session opened is not warming up, it is absent, and every retry is another
+    # three seconds of a person talking to something that cannot hear.
+    MAX_RETRIES = 8
+    COLD_RETRIES = 2
 
     def __init__(self, cfg: Config, on_chunk: Callable[[bytes, float, list[float]], None]) -> None:
         self.cfg = cfg
@@ -353,38 +398,180 @@ class Microphone:
         self._task: asyncio.Task | None = None
         self._bands = BandAnalyser(cfg.sample_rate)
         self.muted = False
+        self._stopping = False
+        # Chunks delivered since the last start, so "it died immediately" and
+        # "it ran for a while and then died" are different lines in the log.
+        self.chunks = 0
+        # Where to go when the chosen device never produces anything. Deaf is
+        # the worst possible end state: a working microphone of the wrong kind
+        # still lets someone finish the sentence they started.
+        self.fallback_target = ""
+        # Told about faults worth putting on screen, not only in the log.
+        self.on_fault: Callable[[str], None] | None = None
+        # Every chunk ever delivered, so throughput can be measured against the
+        # clock rather than inferred from the process still being alive.
+        self.chunks_total = 0
 
     async def start(self) -> None:
-        if self._proc is not None:
+        # `done()` matters as much as `is not None`. The pump task ends by
+        # itself when it gives up on a device, and a finished task left in this
+        # field turned every later start into a silent no-op: a session with no
+        # capture at all, no log line, and a panel saying "listening".
+        if self._task is not None and not self._task.done():
             return
+        self._stopping = False
+        # Per session, not per daemon: "has this device ever worked" has to mean
+        # "since this conversation opened", or a microphone that worked an hour
+        # ago buys an absent one the patience meant for a stumble.
+        self.chunks_total = 0
+        self._task = asyncio.create_task(self._run(), name="mic-pump")
+
+    async def _spawn(self) -> asyncio.subprocess.Process | None:
         argv = [*_PDEATHSIG, "pw-record", *_pw_common(self.cfg)]
         if self.target:
             argv += ["--target", self.target]
         argv.append("-")
-
         log.debug("mic: %s", " ".join(argv))
-        self._proc = await asyncio.create_subprocess_exec(
-            *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
-        )
-        self._task = asyncio.create_task(self._pump(), name="mic-pump")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *argv,
+                stdout=asyncio.subprocess.PIPE,
+                # Kept, not discarded. When pw-record refuses a target it says
+                # so on stderr and exits — and throwing that away is how "the
+                # microphone produced nothing" stayed a mystery through several
+                # rounds of guessing.
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except OSError as exc:
+            log.error("could not start pw-record: %s", exc)
+            return None
+        asyncio.create_task(self._drain_stderr(proc), name="mic-stderr")
+        return proc
 
-    async def _pump(self) -> None:
-        assert self._proc and self._proc.stdout
+    async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
+        if proc.stderr is None:
+            return
+        try:
+            data = await proc.stderr.read()
+        except (asyncio.CancelledError, ValueError):
+            return
+        text = data.decode(errors="replace").strip()
+        if text:
+            log.warning("pw-record said: %s", text[:300])
+
+    async def _run(self) -> None:
+        try:
+            await self._loop()
+        finally:
+            # Whatever ended this — giving up, cancellation — the field must not
+            # outlive the task that owns it.
+            self._task = None
+
+    async def _loop(self) -> None:
+        attempts = 0
+        while not self._stopping:
+            proc = await self._spawn()
+            if proc is None:
+                return
+            self._proc = proc
+            delivered = await self._read(proc)
+            self.chunks += delivered
+
+            if self._stopping:
+                return
+            attempts = 0 if delivered else attempts + 1
+            log.warning(
+                "microphone stream ended after %d chunks (%d this session, "
+                "pw-record exit=%s, target=%r) — restarting, attempt %d",
+                delivered,
+                self.chunks_total,
+                proc.returncode,
+                self.target or "system default",
+                attempts,
+            )
+            # "Has it worked" means a second of audio, not a chunk. A device
+            # that dribbles a handful of frames and stops is absent, and
+            # counting those as evidence of health buys it the patience meant
+            # for a device that was genuinely running.
+            worked = self.chunks_total >= 1000 // max(1, self.cfg.chunk_ms)
+            limit = self.MAX_RETRIES if worked else self.COLD_RETRIES
+            if attempts >= limit:
+                if self.fallback_target and self.target != self.fallback_target:
+                    log.error(
+                        "microphone %r never produced audio — falling back to %r",
+                        self.target or "system default",
+                        self.fallback_target,
+                    )
+                    self._fault(f"microphone unavailable, switched to {self.fallback_target}")
+                    self.target = self.fallback_target
+                    attempts = 0
+                    continue
+                log.error(
+                    "microphone %r produced nothing in %d attempts — giving up. "
+                    "The session is deaf; pick another microphone in settings.",
+                    self.target or "system default",
+                    attempts,
+                )
+                self._fault("no working microphone — pick one in settings")
+                return
+            # Backing off rather than hammering. Reopening a Bluetooth headset's
+            # HFP transport is itself what destabilises it — the kernel starts
+            # logging "SCO packet for unknown connection handle" — so a tight
+            # retry loop turns a stumble into a wedged audio graph.
+            await asyncio.sleep(self.RETRY_SECONDS * (2 ** min(attempts - 1, 4)))
+
+    def _fault(self, message: str) -> None:
+        if self.on_fault is None:
+            return
+        try:
+            self.on_fault(message)
+        except Exception:  # noqa: BLE001
+            log.exception("microphone fault handler failed")
+
+    async def _read(self, proc: asyncio.subprocess.Process) -> int:
+        """Pump one process to exhaustion. Returns how many chunks it gave."""
+        assert proc.stdout
         want = self.cfg.chunk_bytes
+        delivered = 0
         try:
             while True:
-                chunk = await self._proc.stdout.readexactly(want)
+                chunk = await asyncio.wait_for(
+                    proc.stdout.readexactly(want),
+                    timeout=self.START_TIMEOUT if delivered == 0 else self.SILENCE_TIMEOUT,
+                )
+                delivered += 1
+                self.chunks_total += 1
+                if delivered == 1:
+                    log.info(
+                        "microphone streaming: %s", self.target or "system default"
+                    )
                 if self.muted:
                     continue
                 self.on_chunk(chunk, rms_level(chunk), self._bands.push(chunk))
-        except (asyncio.IncompleteReadError, asyncio.CancelledError):
-            pass
+        except asyncio.TimeoutError:
+            log.warning(
+                "microphone %r gave nothing for %.0fs after %d chunks — restarting",
+                self.target or "system default",
+                self.START_TIMEOUT if delivered == 0 else self.SILENCE_TIMEOUT,
+                delivered,
+            )
+            if proc.returncode is None:
+                proc.kill()
+            return delivered
+        except asyncio.IncompleteReadError:
+            return delivered
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001
             log.exception("mic pump died")
+            return delivered
 
     async def stop(self) -> None:
+        self._stopping = True
         if self._task:
             self._task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._task
             self._task = None
         proc, self._proc = self._proc, None
         if proc and proc.returncode is None:

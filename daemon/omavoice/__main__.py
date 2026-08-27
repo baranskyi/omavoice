@@ -637,6 +637,7 @@ class Daemon:
         self.mic.target = self.devices.input_target
         self.mic.fallback_target = self.devices.fallback_input
         self.mic.on_fault = self._on_mic_fault
+        self.mic.verify_target = device_choice.node_exists
         self.speaker.target = self.devices.output_target
 
         # Microphone first. On a Bluetooth headset, opening the microphone is

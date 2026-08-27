@@ -124,7 +124,15 @@ def _is_worn(sink: str, port: str) -> tuple[bool, str]:
     return False, f"sink port {port!r}" if port else "no port reported"
 
 
-async def _node_exists(name: str) -> bool:
+async def node_exists(name: str) -> bool:
+    """Is this capture or playback node actually present right now?
+
+    Worth asking out loud, because `pw-record --target` does not: handed a name
+    that does not exist it records from the default source instead, cheerfully
+    and without a word. A microphone that vanished therefore shows up as audio
+    from the wrong device rather than as silence — which is the harder failure
+    to notice and the easier one to misdiagnose.
+    """
     if not name:
         return False
     text = await _pactl("list", "short", "sources")
@@ -190,6 +198,18 @@ async def resolve(
     conversation costs the person ten seconds of talking to nothing.
     """
     avoid = avoid or set()
+
+    # A device named by hand can be gone — a dock unplugged, a headset off.
+    # Saying so is the whole point: pw-record would take the name, ignore it,
+    # and record from something else without telling anyone.
+    if configured_input and not await node_exists(configured_input):
+        log.warning(
+            "the chosen microphone %r is not present — falling back to whatever "
+            "the system is using, which is not the same device",
+            configured_input,
+        )
+        configured_input = ""
+
     if configured_input and configured_output:
         return Devices(
             configured_input,
@@ -223,7 +243,7 @@ async def resolve(
     # Speakers. The canceller is only useful if it is actually loaded; without
     # the PipeWire config in place its nodes do not exist, and pointing at them
     # would leave the session deaf.
-    if await _node_exists(AEC_SOURCE):
+    if await node_exists(AEC_SOURCE):
         chosen = configured_input or AEC_SOURCE
         if chosen != AEC_SOURCE:
             # The one combination that cannot work, and the one that is easy to

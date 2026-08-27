@@ -20,7 +20,7 @@ import asyncio
 import contextlib
 import logging
 import math
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from .config import Config
 
@@ -428,6 +428,9 @@ class Microphone:
         self.fallback_target = ""
         # Told about faults worth putting on screen, not only in the log.
         self.on_fault: Callable[[str], None] | None = None
+        # Asked whether the target still exists before each spawn. Optional so
+        # this file stays free of any opinion about how devices are enumerated.
+        self.verify_target: Callable[[str], Awaitable[bool]] | None = None
         # Every chunk ever delivered, so throughput can be measured against the
         # clock rather than inferred from the process still being alive.
         self.chunks_total = 0
@@ -447,6 +450,25 @@ class Microphone:
         self._task = asyncio.create_task(self._run(), name="mic-pump")
 
     async def _spawn(self) -> asyncio.subprocess.Process | None:
+        # Checked every time, not once at session start: a dock can be
+        # unplugged mid-conversation. pw-record accepts a name that no longer
+        # resolves and records from the default source instead, so without this
+        # a vanished microphone is not silence — it is somebody else's
+        # microphone, arriving as though nothing happened.
+        if self.target and self.verify_target is not None:
+            try:
+                present = await self.verify_target(self.target)
+            except Exception:  # noqa: BLE001
+                present = True
+            if not present:
+                log.warning(
+                    "microphone %r is gone — recording from the system default "
+                    "instead, which is a different device",
+                    self.target,
+                )
+                self._fault(f"{self.target} is gone — using the default microphone")
+                self.target = ""
+
         argv = [*_PDEATHSIG, "pw-record", *_pw_common(self.cfg)]
         if self.target:
             argv += ["--target", self.target]

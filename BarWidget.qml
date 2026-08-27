@@ -17,7 +17,10 @@ BarWidget {
 
   readonly property string voiceState: client.connected ? client.voiceState : "offline"
   readonly property bool showLabel: {
-    const value = setting("showLabel", false)
+    // Same default as the manifest: without a stored value the fallback here is
+    // what actually decides, and a mismatch would leave the setting looking on
+    // and behaving off.
+    const value = setting("showLabel", true)
     if (typeof value === "boolean") return value
     return ["true", "1", "yes", "on"].indexOf(String(value).trim().toLowerCase()) !== -1
   }
@@ -32,11 +35,38 @@ BarWidget {
     }
   }
 
+  // Ticks only while the agent is out, which is the one state worth counting:
+  // waiting ten seconds is fine when the number is moving, and the same ten
+  // seconds against a still icon read as a hang.
+  property real now: 0
+
+  Timer {
+    interval: 1000
+    repeat: true
+    running: client.pendingSince > 0
+    triggeredOnStart: true
+    onTriggered: root.now = Date.now()
+  }
+
+  readonly property int waitedSeconds: client.pendingSince > 0
+    ? Math.max(0, Math.round((root.now - client.pendingSince) / 1000))
+    : 0
+
+  // One word, so it can live in a bar without becoming a second panel. It
+  // exists to answer one question from across the room: can I talk now.
   readonly property string label: {
+    // An outstanding question outranks the voice state, and is checked rather
+    // than inferred from it: a question asked in text never flips the state to
+    // "thinking", so keying off the state alone left the bar claiming to be
+    // listening while the agent was away.
+    if (client.pendingSince > 0)
+      return root.waitedSeconds > 0 ? "looking " + root.waitedSeconds + "s" : "looking"
+
     switch (voiceState) {
     case "listening": return "listening"
     case "thinking": return "looking"
     case "speaking": return "speaking"
+    case "error": return "error"
     default: return ""
     }
   }

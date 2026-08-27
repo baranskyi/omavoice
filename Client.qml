@@ -41,6 +41,15 @@ Item {
   property var files: []
   property string errorText: ""
 
+  // --- audio path -----------------------------------------------------------
+  // Which microphone the daemon is using, what it could use, and whether the
+  // choice is being made for us. Empty `audioInput` means "follow the system",
+  // which is the default and picks a headset when one is worn.
+  property var audioSources: []
+  property string audioInput: ""
+  property string audioResolved: ""
+  property bool audioHeadphones: false
+
   signal answered()
 
   // The waterfall. Newest first, because the interesting line is always the
@@ -108,6 +117,7 @@ Item {
     clearConversation()
     return send({ cmd: "reset" })
   }
+  function setInput(name) { return send({ cmd: "input", value: String(name || "") }) }
   function setBackend(name) { return send({ cmd: "backend", value: String(name) }) }
   function setVoice(name) { return send({ cmd: "voice", value: String(name) }) }
   function setApiKey(key) { return send({ cmd: "apikey", value: String(key) }) }
@@ -159,6 +169,12 @@ Item {
       break
     case "voices":
       if (Array.isArray(message.voices)) root.voiceCatalogue = message.voices
+      break
+    case "audio":
+      root.audioInput = String(message.input || "")
+      root.audioResolved = String(message.resolved || "")
+      root.audioHeadphones = message.headphones === true
+      if (Array.isArray(message.sources)) root.audioSources = message.sources
       break
     case "transcript":
       if (message.role === "user") {

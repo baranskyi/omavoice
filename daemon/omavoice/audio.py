@@ -61,8 +61,34 @@ def _samples_of(pcm: bytes) -> array.array:
     return samples
 
 
+def clipped_samples(pcm: bytes, ceiling: int = 32000) -> int:
+    """How many samples in this chunk are pinned near full scale.
+
+    Loud and clipped look the same in an RMS meter — both read high — but only
+    one of them is destroying the waveform, and a clipped waveform transcribes
+    into confident nonsense no threshold can rescue. Counting the pinned
+    samples separates the two in one number.
+    """
+    return sum(1 for s in _samples_of(pcm) if s >= ceiling or s <= -ceiling)
+
+
+def rms_full_scale(pcm: bytes) -> float:
+    """RMS of a chunk against the real ceiling of PCM16, 0..1.
+
+    Kept separate from `rms_level` on purpose. That one is normalised against
+    `_FULL_SCALE`, a number chosen so the waveform on screen looks lively — it
+    reaches 1.0 at a level that is merely loud, not clipped. Reading it as
+    headroom cost half a day of wrong diagnoses. Anything reasoning about
+    actual signal strength wants this one.
+    """
+    samples = _samples_of(pcm)
+    if not samples:
+        return 0.0
+    return math.sqrt(sum(s * s for s in samples) / len(samples)) / 32768.0
+
+
 def rms_level(pcm: bytes) -> float:
-    """Normalised 0..1 loudness of a PCM16 chunk, for the waveform.
+    """Loudness of a PCM16 chunk on the display scale, 0..1 — for the waveform.
 
     Hand-rolled because audioop was removed in Python 3.13 — and this is four
     lines, so there is nothing to miss.
@@ -121,6 +147,79 @@ class BandAnalyser:
             magnitude = math.sqrt(max(0.0, power)) / _ANALYSIS_SAMPLES
             out.append(min(1.0, magnitude / scale))
         return out
+
+
+class AutoGain:
+    """Brings a quiet microphone up to a level speech recognition can read.
+
+    Measured, not assumed. The same sentence, recorded on this machine and fed
+    to the API untouched, came back as one word; amplified eight times, as the
+    whole question. Nothing about it was distorted — there simply was not
+    enough signal for the model to work with:
+
+        as captured   'Wut'              'the weather.'      'はい。'
+        x8            'What is a man?'   'What is the...'    'I want to know.'
+
+    A microphone built into a display sits an arm's length further away than
+    the one in a laptop lid, and its output is quieter by roughly that much.
+    Which one is in use changes when a cable is plugged in, so a fixed gain
+    would be wrong again the moment the desk changes. This tracks how loud
+    speech actually is and scales it towards a target.
+
+    Deliberately not done with the system volume control: that is shared with
+    every other program on the machine, and turning it up for the assistant
+    turned it up for dictation too, where it clipped.
+    """
+
+    # Where speech should land. The reference recording that transcribes
+    # perfectly sits around here, and the model tolerates a hot signal far
+    # better than a faint one — amplifying past the point of some clipping
+    # still recovered more words than leaving it quiet.
+    TARGET = 0.25
+    # Never quieter than it arrived, and never so loud that a burst of noise
+    # becomes a shout.
+    MIN_GAIN = 1.0
+    MAX_GAIN = 16.0
+
+    def __init__(self, chunk_ms: int = 20) -> None:
+        self._speech_peak = 0.0
+        self.gain = 1.0
+        # Roughly a second and a half of speech to settle, and slow release so
+        # the level does not pump between words.
+        self._attack = 0.05
+        self._release = 0.002
+
+    def observe(self, level: float, speaking: bool) -> None:
+        """Fold one chunk into the estimate. Only speech counts.
+
+        `level` must be full-scale RMS (`rms_full_scale`), not the display
+        scale — the two differ by 5.5x, and mixing them silently produces a
+        gain of one.
+        """
+        if not speaking:
+            return
+        if level > self._speech_peak:
+            self._speech_peak += (level - self._speech_peak) * self._attack
+        else:
+            self._speech_peak += (level - self._speech_peak) * self._release
+        if self._speech_peak > 1e-4:
+            wanted = self.TARGET / self._speech_peak
+            self.gain = max(self.MIN_GAIN, min(self.MAX_GAIN, wanted))
+
+    def apply(self, pcm: bytes) -> bytes:
+        """Scale a chunk, clamping rather than wrapping at the edges."""
+        if self.gain <= 1.001:
+            return pcm
+        samples = _samples_of(pcm)
+        gain = self.gain
+        out = array.array(
+            "h", (max(-32768, min(32767, int(s * gain))) for s in samples)
+        )
+        return out.tobytes()
+
+    def reset(self) -> None:
+        self._speech_peak = 0.0
+        self.gain = 1.0
 
 
 class NoiseGate:
@@ -248,6 +347,8 @@ class Microphone:
     def __init__(self, cfg: Config, on_chunk: Callable[[bytes, float, list[float]], None]) -> None:
         self.cfg = cfg
         self.on_chunk = on_chunk
+        # Set per session by the daemon; empty means the system default.
+        self.target = cfg.input_target
         self._proc: asyncio.subprocess.Process | None = None
         self._task: asyncio.Task | None = None
         self._bands = BandAnalyser(cfg.sample_rate)
@@ -257,8 +358,8 @@ class Microphone:
         if self._proc is not None:
             return
         argv = [*_PDEATHSIG, "pw-record", *_pw_common(self.cfg)]
-        if self.cfg.input_target:
-            argv += ["--target", self.cfg.input_target]
+        if self.target:
+            argv += ["--target", self.target]
         argv.append("-")
 
         log.debug("mic: %s", " ".join(argv))
@@ -302,6 +403,8 @@ class Speaker:
     ) -> None:
         self.cfg = cfg
         self.on_level = on_level
+        # Set per session by the daemon; empty means the system default.
+        self.target = cfg.output_target
         self._bands = BandAnalyser(cfg.sample_rate)
         self._proc: asyncio.subprocess.Process | None = None
         self._lock = asyncio.Lock()
@@ -322,8 +425,8 @@ class Speaker:
 
     async def _spawn(self) -> asyncio.subprocess.Process:
         argv = [*_PDEATHSIG, "pw-play", *_pw_common(self.cfg)]
-        if self.cfg.output_target:
-            argv += ["--target", self.cfg.output_target]
+        if self.target:
+            argv += ["--target", self.target]
         argv.append("-")
         log.debug("speaker: %s", " ".join(argv))
         return await asyncio.create_subprocess_exec(

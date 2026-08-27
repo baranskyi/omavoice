@@ -155,10 +155,14 @@ Item {
     voices: client.voiceCatalogue
     currentVoice: client.voice
     backend: client.backend
+    audioSources: client.audioSources
+    audioInput: client.audioInput
+    audioResolved: client.audioResolved
     keyError: root.keyError
     onClosed: root.settingsOpen = false
     onVoicePicked: function (name) { client.setVoice(name) }
     onBackendPicked: function (name) { client.setBackend(name) }
+    onInputPicked: function (name) { client.setInput(name) }
     onKeySubmitted: function (key) {
       root.keyError = ""
       client.setApiKey(key)

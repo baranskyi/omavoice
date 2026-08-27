@@ -347,6 +347,19 @@ class RealtimeSession:
                 await self.on_audio(base64.b64decode(delta))
             return
 
+        if kind in ("session.created", "session.updated"):
+            # What the server actually applied, which is not necessarily what
+            # we asked for: an unknown or misplaced field is dropped in
+            # silence, and the session then runs on defaults nobody chose.
+            session = event.get("session") or {}
+            audio_in = (session.get("audio") or {}).get("input") or {}
+            log.info(
+                "%s: turn_detection=%s input_format=%s",
+                kind,
+                audio_in.get("turn_detection"),
+                (audio_in.get("format") or {}),
+            )
+
         if kind == "response.created":
             self._response_active = True
         elif kind in ("response.done", "response.cancelled"):

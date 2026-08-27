@@ -78,17 +78,14 @@ class Config:
     # 20 ms of audio = 480 frames = 960 bytes. Small enough that barge-in feels
     # immediate, large enough that we are not doing syscalls all day.
     chunk_ms: int = 20
-    # Both ends must go through the echo canceller, and this is the part that
-    # is easy to get half right: recording from echo-cancel-source while
-    # playing to the default sink leaves the canceller with no reference
-    # signal, so it subtracts nothing and the assistant answers its own voice.
-    # Record from its source, play into its sink. Both, or neither works.
-    input_target: str = field(
-        default_factory=lambda: os.environ.get("OMAVOICE_INPUT", "echo-cancel-source")
-    )
-    output_target: str = field(
-        default_factory=lambda: os.environ.get("OMAVOICE_OUTPUT", "omavoice_playback")
-    )
+    # Empty means "decide per session" — see devices.py, which follows whatever
+    # the system is using and switches the echo canceller in or out with it.
+    # Naming a device here pins it, and then both ends must be named: recording
+    # from echo-cancel-source while playing to the default sink leaves the
+    # canceller with no reference signal, so it subtracts nothing and the
+    # assistant answers its own voice. Both, or neither.
+    input_target: str = field(default_factory=lambda: os.environ.get("OMAVOICE_INPUT", ""))
+    output_target: str = field(default_factory=lambda: os.environ.get("OMAVOICE_OUTPUT", ""))
 
     # --- realtime ----------------------------------------------------------
     api_key: str = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY", ""))
@@ -127,6 +124,19 @@ class Config:
     # --- plumbing ----------------------------------------------------------
     socket_path: Path = field(default_factory=lambda: _runtime_dir() / "omavoice.sock")
     state_dir: Path = field(default_factory=_state_dir)
+    # Three taps on the audio path, each writing raw PCM16 at `sample_rate`.
+    # Together they answer "where did the sentence go" by elimination, which is
+    # the only way it was ever going to be answered: every theory that skipped
+    # this step turned out to be wrong.
+    #
+    #   OMAVOICE_MIC_DUMP    what pw-record delivered, before the gate
+    #   OMAVOICE_DUMP        what was handed to the API, after the gate
+    #   OMAVOICE_VOICE_DUMP  the assistant's own speech, straight off the API —
+    #                        pristine, and therefore the reference material for
+    #                        `python -m omavoice.probe`
+    mic_dump: str = field(default_factory=lambda: os.environ.get("OMAVOICE_MIC_DUMP", ""))
+    dump_path: str = field(default_factory=lambda: os.environ.get("OMAVOICE_DUMP", ""))
+    voice_dump: str = field(default_factory=lambda: os.environ.get("OMAVOICE_VOICE_DUMP", ""))
     debug: bool = field(default_factory=lambda: _env_flag("OMAVOICE_DEBUG", False))
 
     @property

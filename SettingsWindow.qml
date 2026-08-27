@@ -26,11 +26,15 @@ Item {
   property var voices: []
   property string currentVoice: ""
   property string backend: "codex"
+  property var audioSources: []
+  property string audioInput: ""
+  property string audioResolved: ""
   property string keyError: ""
 
   signal closed()
   signal voicePicked(string name)
   signal backendPicked(string name)
+  signal inputPicked(string name)
   signal keySubmitted(string key)
 
   onOpenChanged: {
@@ -312,6 +316,94 @@ Item {
           PanelSeparator { width: parent.width }
 
           // --- agent --------------------------------------------------------
+          // --- microphone ---------------------------------------------------
+          PanelSectionHeader { width: parent.width; text: "Microphone" }
+
+          Text {
+            width: parent.width
+            // The one line that used to live only in the log, and whose absence
+            // made a changed desk look like a broken assistant.
+            text: root.audioResolved !== ""
+              ? root.audioResolved
+              : "Chosen when a conversation starts."
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Color.menu.text
+            opacity: 0.45
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
+          Flow {
+            id: micFlow
+            width: parent.width
+            spacing: Style.spaceReal(6)
+
+            Repeater {
+              model: [{ name: "", label: "Follow the system" }].concat(root.audioSources)
+
+              Rectangle {
+                id: mic
+                required property var modelData
+
+                readonly property bool selected: String(mic.modelData.name) === root.audioInput
+                readonly property bool auto: String(mic.modelData.name) === ""
+
+                // Measured from the row, never from the chip: sizing the label
+                // against its own chip closes a binding loop, and QML answers a
+                // loop by leaving every width at zero — which stacks the whole
+                // list in one spot.
+                readonly property real maxLabel: micFlow.width - Style.spaceReal(24)
+
+                implicitWidth: micLabel.width + Style.spaceReal(16)
+                implicitHeight: micLabel.implicitHeight + Style.spaceReal(9)
+                radius: Style.spaceReal(5)
+
+                color: mic.selected
+                  ? Style.selectedFillFor(Color.menu.text, Color.accent)
+                  : (micHover.hovered ? Style.hoverFillFor(Color.menu.text, Color.accent) : "transparent")
+                border.width: 1
+                border.color: mic.selected
+                  ? Color.accent
+                  : Qt.rgba(Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.18)
+
+                Behavior on color { ColorAnimation { duration: 140 } }
+
+                Text {
+                  id: micLabel
+                  anchors.centerIn: parent
+                  width: Math.min(implicitWidth, mic.maxLabel)
+                  elide: Text.ElideRight
+                  horizontalAlignment: Text.AlignHCenter
+                  text: String(mic.modelData.label || mic.modelData.name)
+                  textFormat: Text.PlainText
+                  color: mic.selected ? Color.accent : Color.menu.text
+                  opacity: mic.selected ? 1 : (mic.auto ? 0.8 : 0.65)
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.body
+                }
+
+                HoverHandler { id: micHover }
+                TapHandler { onTapped: root.inputPicked(String(mic.modelData.name)) }
+              }
+            }
+          }
+
+          Text {
+            width: parent.width
+            // Said plainly, because it is the single most useful thing anyone
+            // can do about recognition on this machine.
+            text: "Following the system picks a headset when one is worn, and routes "
+                + "through the echo canceller when the room is in play. A microphone "
+                + "close to the mouth is worth more than any setting here."
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: Color.menu.text
+            opacity: 0.35
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
           PanelSectionHeader { width: parent.width; text: "Local agent" }
 
           Row {

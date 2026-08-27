@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.baranskyi.omavoice",
   "name": "Omavoice",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "author": "Slava Baranskyi",
   "license": "MIT",
   "description": "Talk to a local agent out loud. OpenAI Realtime does the hearing and the speaking; codex or claude finds the answer on this machine and on the web.",
@@ -22,7 +22,7 @@
     "defaultSection": "right",
     "defaults": {
       "backend": "codex",
-      "showLabel": false
+      "showLabel": true
     },
     "schema": [
       {
@@ -37,8 +37,8 @@
         "key": "showLabel",
         "type": "boolean",
         "label": "Show state as text",
-        "description": "Next to the icon in the bar.",
-        "defaultValue": false
+        "description": "One word next to the icon: listening, looking, speaking. Lets you talk to the assistant without opening the panel.",
+        "defaultValue": true
       }
     ]
   }

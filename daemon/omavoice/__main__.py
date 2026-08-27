@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 import re
 import signal
 import sys
@@ -25,8 +26,15 @@ import time
 
 import json
 
-from . import config, ipc
-from .audio import Microphone, NoiseGate, Speaker
+from . import config, devices as device_choice, ipc
+from .audio import (
+    AutoGain,
+    Microphone,
+    NoiseGate,
+    Speaker,
+    clipped_samples,
+    rms_full_scale,
+)
 from .brain import Brain
 from .config import Config
 from .realtime import RealtimeSession
@@ -50,6 +58,11 @@ _SPEAKING_GATE_MULTIPLIER = 2.6
 # what was getting through and coming back as "Почему ты можешь мне помочь?"
 # a beat after the assistant said "Чем могу помочь?".
 _ECHO_TAIL_SECONDS = 0.9
+
+
+def _open_dump(path: str):
+    """Open one of the audio taps, or None when it is not asked for."""
+    return open(path, "ab", buffering=0) if path else None
 
 
 def _log_task_failure(task: asyncio.Task) -> None:
@@ -96,6 +109,13 @@ class Daemon:
         # the gate substitutes digital silence for the rest of it, and we hand
         # the server a cleaner silence than the room ever produced — talking it
         # into ending a sentence the person is still in the middle of.
+        self._last_event_at = 0.0
+        self._recovering = False
+        self.autogain = AutoGain(chunk_ms=cfg.chunk_ms)
+        self.devices: device_choice.Devices | None = None
+        self._mic_dump = _open_dump(cfg.mic_dump)
+        self._dump = _open_dump(cfg.dump_path)
+        self._voice_dump = _open_dump(cfg.voice_dump)
         self.gate = NoiseGate(
             cfg.gate_level,
             hangover_ms=cfg.silence_ms + 300,
@@ -138,7 +158,15 @@ class Daemon:
         """
         try:
             self._prefs_path.write_text(
-                json.dumps({"voice": self.cfg.voice, "backend": self.brain.backend}, indent=2)
+                json.dumps(
+                    {
+                        "voice": self.cfg.voice,
+                        "backend": self.brain.backend,
+                        # "" means follow the system; see devices.resolve.
+                        "input": self.cfg.input_target,
+                    },
+                    indent=2,
+                )
             )
         except OSError as exc:
             log.warning("could not save preferences: %s", exc)
@@ -154,6 +182,10 @@ class Daemon:
         backend = str(data.get("backend") or "")
         if backend in ("codex", "claude"):
             self.brain.backend = backend
+        # An environment variable is a deliberate override and outranks a
+        # remembered choice from the settings window.
+        if not os.environ.get("OMAVOICE_INPUT"):
+            self.cfg.input_target = str(data.get("input") or "")
 
     # -- the event stream ----------------------------------------------------
 
@@ -184,6 +216,11 @@ class Daemon:
 
     def _on_input_chunk(self, chunk: bytes, level: float, bands: list[float]) -> None:
         # Called from the mic pump; keep it cheap and never await here.
+        if self._mic_dump is not None:
+            # Before anything of ours has touched it. Paired with the tap after
+            # the gate, this turns "somewhere between the microphone and the
+            # API" into a question with a byte offset for an answer.
+            self._mic_dump.write(chunk)
         session = self.session
         if self.backgrounded:
             return
@@ -208,12 +245,15 @@ class Daemon:
             # the microphone actually delivered, against the threshold it had
             # to clear. Once a second, so a conversation stays readable.
             self._peak_level = max(getattr(self, "_peak_level", 0.0), level)
+            self._clipped = getattr(self, "_clipped", 0) + clipped_samples(chunk)
             self._passed_chunks = getattr(self, "_passed_chunks", 0) + (1 if passed else 0)
             self._level_chunks = getattr(self, "_level_chunks", 0) + 1
             if self._level_chunks * self.cfg.chunk_ms >= 1000:
                 log.debug(
-                    "mic: peak=%.4f gate=%.4f floor=%.4f passed=%d/%d sent=%d",
+                    "mic: peak=%.4f clip=%d gain=%.1fx gate=%.4f floor=%.4f passed=%d/%d sent=%d",
                     self._peak_level,
+                    self._clipped,
+                    self.autogain.gain,
                     threshold if threshold is not None else self.gate.opening_level,
                     self.gate.noise_floor,
                     self._passed_chunks,
@@ -221,10 +261,16 @@ class Daemon:
                     session.sent_events,
                 )
                 self._peak_level = 0.0
+                self._clipped = 0
                 self._passed_chunks = 0
                 self._level_chunks = 0
 
+        # Measured before the gain, so the gate keeps judging the microphone
+        # against its own noise floor rather than against how loud we made it.
+        self.autogain.observe(rms_full_scale(chunk), passed)
+
         if passed:
+            chunk = self.autogain.apply(chunk)
             self._pending_level = max(self._pending_level, level)
             self._pending_bands = bands
         else:
@@ -233,8 +279,14 @@ class Daemon:
             chunk = bytes(len(chunk))
             self._pending_level = max(self._pending_level, 0.0)
 
+        if self._dump is not None:
+            self._dump.write(chunk)
+
         task = asyncio.create_task(session.send_audio(chunk))
         task.add_done_callback(_log_task_failure)
+
+        if passed:
+            self._check_deaf_server(session)
 
     def _room_is_loud(self) -> bool:
         if self.speaker.playing:
@@ -276,6 +328,8 @@ class Daemon:
     async def _on_audio(self, pcm: bytes) -> None:
         # Never awaits on the speaker: this runs inside the socket read loop.
         self._set_state("speaking")
+        if self._voice_dump is not None:
+            self._voice_dump.write(pcm)
         self._play_queue.put_nowait(pcm)
 
     async def _play_pump(self) -> None:
@@ -336,8 +390,51 @@ class Daemon:
         self.server.broadcast(answer.as_ui_payload())
         return answer
 
+    # How long someone may talk into a session that has stopped answering
+    # before we stop believing in it. Long enough that a thoughtful pause in
+    # the middle of a sentence is never mistaken for a wedged session.
+    _DEAF_AFTER_SECONDS = 6.0
+
+    def _check_deaf_server(self, session: RealtimeSession) -> None:
+        """Notice a session that has stopped hearing, and rebuild it.
+
+        Twice now a session has gone quiet mid-conversation: the socket stays
+        open and accepts everything we send — the sent counter keeps climbing —
+        but the server stops emitting events entirely, so speech is never
+        detected and nothing is ever answered. From the outside it looks
+        exactly like a microphone that died, which is the worst thing it could
+        look like, because nothing in the panel or the log says otherwise.
+
+        We cannot fix the far end, but we can stop pretending. If the gate is
+        passing audio — someone is talking — and the server has said nothing at
+        all for six seconds, the connection is rebuilt. That costs a second and
+        keeps the microphone, the speaker and the echo canceller untouched.
+        """
+        if self.state != "listening" or self._recovering:
+            return
+        now = asyncio.get_running_loop().time()
+        if now - self._last_event_at < self._DEAF_AFTER_SECONDS:
+            return
+        log.warning(
+            "server has not answered for %.1fs while audio was flowing — reconnecting",
+            now - self._last_event_at,
+        )
+        self._recovering = True
+        task = asyncio.create_task(self._rebuild_session(), name="recover")
+        task.add_done_callback(_log_task_failure)
+
+    async def _rebuild_session(self) -> None:
+        try:
+            self._emit("reconnect", "session stopped responding")
+            await self.stop_session(keep_audio=True)
+            await self.start_session()
+        finally:
+            self._recovering = False
+
     async def _on_event(self, event: dict) -> None:
         kind = event.get("type", "")
+        # Any event at all means the far end is still processing what we send.
+        self._last_event_at = asyncio.get_running_loop().time()
 
         if kind == "input_audio_buffer.speech_started":
             # Barge-in. Drop what is queued for the speakers and stop the model
@@ -444,11 +541,28 @@ class Daemon:
             return {"ok": False, "error": message}
 
         self.session = session
+        # Start the watchdog's clock now: at zero it would read a brand-new
+        # session as one that has been silent since the epoch.
+        self._last_event_at = asyncio.get_running_loop().time()
         self.brain.reset()
         self.gate.reset()
+        self.autogain.reset()
         self._drop_queued_audio()
         self.backgrounded = False
         self._emit("session", self.cfg.model)
+
+        # Picked here rather than once at startup: headphones come and go, and
+        # so does the display they are competing with. `echo-cancel-source`
+        # looks identical in every case, which is exactly why the substitution
+        # used to be invisible — so say out loud what was chosen.
+        self.devices = await device_choice.resolve(
+            self.cfg.input_target, self.cfg.output_target
+        )
+        log.info("audio: %s", self.devices.describe())
+        asyncio.create_task(self._broadcast_audio()).add_done_callback(_log_task_failure)
+        self.mic.target = self.devices.input_target
+        self.speaker.target = self.devices.output_target
+
         await self.speaker.start()
         await self.mic.start()
         if self._play_task is None:
@@ -470,17 +584,33 @@ class Daemon:
             if self.session is session:
                 await self.stop_session()
 
-    async def stop_session(self) -> dict:
+    async def stop_session(self, keep_audio: bool = False) -> dict:
+        """Close the conversation. With keep_audio, leave the pipes running.
+
+        Starting a new conversation has nothing to do with the microphone —
+        the history lives on the WebSocket — but tearing the capture and
+        playback streams down took the echo canceller with them. It learns the
+        delay between speaker and microphone from live audio (delay_agnostic),
+        and a restart throws that away: for the next few seconds it subtracts
+        nothing, the assistant hears itself, and the transcript fills with
+        short fragments in languages nobody spoke. Pressing "new conversation"
+        four times bought four windows of deafness.
+        """
         session, self.session = self.session, None
         task, self._session_task = self._session_task, None
         self.backgrounded = False
 
-        await self.mic.stop()
+        if not keep_audio:
+            await self.mic.stop()
         self._drop_queued_audio()
         play_task, self._play_task = self._play_task, None
         if play_task:
             play_task.cancel()
-        await self.speaker.flush_now()
+        # Killing the player is how an answer in flight is cut off. When the
+        # audio is being kept, do it only if something is actually playing —
+        # otherwise a reset in silence would still suspend the canceller.
+        if not keep_audio or self.speaker.playing:
+            await self.speaker.flush_now()
         if session:
             await session.close()
         if task and task is not asyncio.current_task():
@@ -494,6 +624,26 @@ class Daemon:
         # "listening"; the guard in _on_tool_call keys off session being None,
         # which it now is.
         return {"ok": True}
+
+    async def _broadcast_audio(self) -> None:
+        """Tell the panel what the audio path is and what else it could be.
+
+        Broadcast rather than answered on request: the IPC replays the last
+        message of each type to a late joiner, so a settings window opened at
+        any moment already knows, without a round trip.
+        """
+        self.server.broadcast(
+            {
+                "type": "audio",
+                "input": self.cfg.input_target,
+                # The log gets the full technical line; the panel gets the
+                # short one. Putting `describe()` in a settings window was a
+                # mistake — it read as a stack trace where a name belonged.
+                "resolved": self.devices.summary if self.devices else "",
+                "headphones": bool(self.devices and self.devices.headphones),
+                "sources": await device_choice.list_sources(),
+            }
+        )
 
     # -- commands from the panel --------------------------------------------
 
@@ -547,7 +697,7 @@ class Daemon:
 
             was_live = self.session is not None
             if was_live:
-                await self.stop_session()
+                await self.stop_session(keep_audio=True)
                 result = await self.start_session()
                 if not result.get("ok"):
                     return result
@@ -633,6 +783,37 @@ class Daemon:
             await self.session.say(str(message.get("text") or "Проверка связи."))
             return {"ok": True}
 
+        if command == "audio":
+            # Everything the settings window needs to show the audio path and
+            # let someone change it: what is in use, what it resolved to and
+            # why, and what else this machine could listen on.
+            return {
+                "ok": True,
+                "input": self.cfg.input_target,
+                "resolved": self.devices.summary if self.devices else "",
+                "headphones": bool(self.devices and self.devices.headphones),
+                "sources": await device_choice.list_sources(),
+            }
+
+        if command == "input":
+            # "" restores following the system, which is the default and the
+            # right answer for almost everyone: it picks the headset when one
+            # is worn and the echo canceller when the room is in play.
+            value = str(message.get("value") or "")
+            if value == self.cfg.input_target:
+                return {"ok": True, "input": value}
+            self.cfg.input_target = value
+            self._save_preferences()
+            # The microphone is chosen when a session opens, so an open one has
+            # to be rebuilt for the change to mean anything.
+            if self.session is not None:
+                await self.stop_session()
+                result = await self.start_session()
+                if not result.get("ok"):
+                    return result
+            await self._broadcast_audio()
+            return {"ok": True, "input": value}
+
         if command == "status":
             return {
                 "ok": True,
@@ -643,6 +824,14 @@ class Daemon:
                 "session": self.session is not None,
                 "background": self.backgrounded,
                 "hasKey": bool(self.cfg.api_key),
+                # Which microphone is actually feeding the session. Worth a line
+                # of its own: every device in play can present itself under the
+                # same name, and a silent substitution reads as a broken
+                # assistant rather than a changed desk.
+                "input": self.devices.input_target if self.devices else "",
+                "output": self.devices.output_target if self.devices else "",
+                "headphones": bool(self.devices and self.devices.headphones),
+                "audio": self.devices.describe() if self.devices else "no session yet",
             }
 
         log.warning("unknown command: %s", command)
@@ -675,6 +864,9 @@ class Daemon:
                 loop.add_signal_handler(sig, self._stopping.set)
 
         log.info("ready (backend=%s, key=%s)", self.brain.backend, "yes" if self.cfg.api_key else "NO")
+        # So a panel opened before the first conversation already knows what
+        # the audio path would be, rather than showing an empty settings page.
+        await self._broadcast_audio()
         await self._stopping.wait()
 
         log.info("shutting down")

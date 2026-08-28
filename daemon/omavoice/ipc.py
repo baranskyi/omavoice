@@ -103,7 +103,11 @@ class Server:
         # tail of them is worth keeping so a reopened panel has context.
         if kind == "event":
             self._recent_events.append(message)
-        elif kind and kind != "level":
+        elif kind and kind not in ("level", "trace"):
+            # `trace` joins `level` in not being kept. Both are windows onto
+            # something happening right now, and replaying either to a panel
+            # that opened afterwards would show a person the agent working on
+            # a question that was answered minutes ago.
             self._latest[kind] = message
 
         payload = (json.dumps(message, ensure_ascii=False) + "\n").encode()

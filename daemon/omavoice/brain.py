@@ -26,6 +26,7 @@ import os
 import re
 import shutil
 import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -77,6 +78,15 @@ _MAX_VALUE = 2048
 _MAX_THREAD_ID = 200
 
 _CHUNK = 64 * 1024
+
+# A single line of the agent's event stream. One `command_execution` event
+# carries the command's whole output, so these are not small — but they are
+# held only until the newline that ends them, and anything past this is
+# dropped rather than accumulated.
+_MAX_TRACE_LINE = 128 * 1024
+# What survives into a line shown behind the waveform. It is meant to be
+# half-read, not read.
+_MAX_TRACE_TEXT = 180
 
 
 def _clip(text: str, limit: int) -> str:
@@ -281,6 +291,7 @@ class Brain:
         # not try to resume a codex thread inside claude.
         self._threads: dict[str, str] = {}
         self._proc: asyncio.subprocess.Process | None = None
+        self._on_trace: "Callable[[str], None] | None" = None
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -296,6 +307,77 @@ class Brain:
     def reset(self) -> None:
         """Forget conversation history. A new panel session starts clean."""
         self._threads.clear()
+
+    def watch(self, on_trace: "Callable[[str], None] | None") -> None:
+        """Be told what the agent is doing while it is doing it.
+
+        There is a gap in this program between asking the agent something and
+        hearing the answer, and for a long question it is twenty or thirty
+        seconds of a panel that looks asleep. The agent is not asleep — it is
+        narrating its plan and running commands, all of it already on stdout —
+        and none of that ever reached anyone because the output was read to the
+        end before being looked at.
+        """
+        self._on_trace = on_trace
+
+    def _trace(self, text: str) -> None:
+        if self._on_trace is None:
+            return
+        text = " ".join(text.split())
+        if not text:
+            return
+        if len(text) > _MAX_TRACE_TEXT:
+            text = text[:_MAX_TRACE_TEXT].rstrip() + " …"
+        try:
+            self._on_trace(text)
+        except Exception:  # noqa: BLE001
+            log.debug("trace sink failed", exc_info=True)
+
+    def _codex_trace(self, line: str) -> None:
+        """One line of `codex exec --json`, turned into one line worth seeing.
+
+        Deliberately not everything: the token accounting and the thread ids
+        say nothing to a person waiting. What does is the agent saying what it
+        intends to do, and the commands it actually runs.
+        """
+        line = line.strip()
+        if not line.startswith("{"):
+            return
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if not isinstance(event, dict):
+            return
+        item = event.get("item")
+        if not isinstance(item, dict):
+            return
+        kind = item.get("type")
+        if kind == "agent_message" and event.get("type") == "item.completed":
+            # Under --output-schema the agent talks to us in JSON, so the
+            # message is `{"spoken": "I'll run ls…", "markdown": …}` rather
+            # than a sentence. The sentence is in there; showing the envelope
+            # instead would put punctuation on screen where the plan should be.
+            text = str(item.get("text") or "")
+            stripped = text.lstrip()
+            if stripped.startswith("{"):
+                try:
+                    inner = json.loads(stripped)
+                except json.JSONDecodeError:
+                    inner = None
+                if isinstance(inner, dict):
+                    text = str(inner.get("spoken") or inner.get("markdown") or "")
+            self._trace(text)
+        elif kind == "command_execution":
+            if event.get("type") == "item.started":
+                self._trace("$ " + str(item.get("command") or ""))
+            else:
+                out = str(item.get("aggregated_output") or "").strip()
+                first = out.splitlines()[0] if out else ""
+                if first:
+                    self._trace(first)
+        elif kind == "reasoning":
+            self._trace(str(item.get("text") or ""))
 
     def denial(self) -> str:
         """Why this backend may not be asked anything, or "" if it may.
@@ -354,7 +436,12 @@ class Brain:
     # -- backends -----------------------------------------------------------
 
     async def _drain(
-        self, proc: asyncio.subprocess.Process, stream: asyncio.StreamReader, limit: int, what: str
+        self,
+        proc: asyncio.subprocess.Process,
+        stream: asyncio.StreamReader,
+        limit: int,
+        what: str,
+        on_line: "Callable[[str], None] | None" = None,
     ) -> bytes:
         """Read one pipe up to `limit` bytes, then end the process writing it.
 
@@ -365,17 +452,54 @@ class Brain:
         producing an answer, and the way to stop paying for it is to end it.
         """
         buf = bytearray()
+        # Only allocated when somebody is listening for lines. The whole point
+        # of reading in blocks is that we are not obliged to look at them.
+        pending = bytearray() if on_line is not None else None
         while len(buf) < limit:
             block = await stream.read(min(_CHUNK, limit - len(buf)))
             if not block:
+                if pending:
+                    self._offer(on_line, bytes(pending))
                 return bytes(buf)
             buf += block
+            if pending is not None:
+                pending += block
+                while True:
+                    cut = pending.find(b"\n")
+                    if cut < 0:
+                        # A producer that never sends a newline must not be
+                        # able to grow this without bound. The full bytes are
+                        # still in `buf` under its own ceiling.
+                        if len(pending) > _MAX_TRACE_LINE:
+                            del pending[:]
+                        break
+                    line = bytes(pending[:cut])
+                    del pending[: cut + 1]
+                    self._offer(on_line, line)
         log.warning("agent wrote more than %d bytes to %s — stopping it", limit, what)
         await _reap(proc)
         return bytes(buf)
 
+    @staticmethod
+    def _offer(on_line, raw: bytes) -> None:
+        """Hand one line to the watcher, and never let it break the answer.
+
+        This runs on the path that is reading the agent's output. A watcher
+        that raises here would abort the read, which would cost the person the
+        answer they are waiting for in exchange for a decoration.
+        """
+        if not raw or len(raw) > _MAX_TRACE_LINE:
+            return
+        try:
+            on_line(raw.decode(errors="replace"))
+        except Exception:  # noqa: BLE001
+            log.debug("trace watcher failed", exc_info=True)
+
     async def _gather(
-        self, proc: asyncio.subprocess.Process, stdin: bytes | None
+        self,
+        proc: asyncio.subprocess.Process,
+        stdin: bytes | None,
+        on_line: "Callable[[str], None] | None" = None,
     ) -> tuple[bytes, bytes]:
         """What `communicate()` does, with a ceiling on each pipe.
 
@@ -391,13 +515,18 @@ class Brain:
                 proc.stdin.close()
         assert proc.stdout is not None and proc.stderr is not None
         out, err = await asyncio.gather(
-            self._drain(proc, proc.stdout, _MAX_STDOUT, "stdout"),
+            self._drain(proc, proc.stdout, _MAX_STDOUT, "stdout", on_line),
             self._drain(proc, proc.stderr, _MAX_STDERR, "stderr"),
         )
         await proc.wait()
         return out, err
 
-    async def _run(self, argv: list[str], stdin: bytes | None = None) -> tuple[int, str, str]:
+    async def _run(
+        self,
+        argv: list[str],
+        stdin: bytes | None = None,
+        on_line: "Callable[[str], None] | None" = None,
+    ) -> tuple[int, str, str]:
         log.debug("running %s", " ".join(argv[:6]))
         proc = await asyncio.create_subprocess_exec(
             *argv,
@@ -412,7 +541,9 @@ class Brain:
         )
         self._proc = proc
         try:
-            out, err = await asyncio.wait_for(self._gather(proc, stdin), timeout=self.cfg.brain_timeout)
+            out, err = await asyncio.wait_for(
+                self._gather(proc, stdin, on_line), timeout=self.cfg.brain_timeout
+            )
         except (asyncio.TimeoutError, asyncio.CancelledError):
             # Both paths used to leave the agent running. `communicate()` being
             # cancelled does not touch the child, and the old `finally` dropped
@@ -478,7 +609,7 @@ class Brain:
             argv += ["resume", thread]
         argv += [*after, query]
 
-        code, stdout, stderr = await self._run(argv)
+        code, stdout, stderr = await self._run(argv, on_line=self._codex_trace)
 
         # thread.started only appears on the first turn; resumed turns keep the id.
         for line in stdout.splitlines():

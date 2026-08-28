@@ -73,6 +73,11 @@ Item {
 
   signal answered()
 
+  // One line of the agent's working, as it happens. Not stored: the panel
+  // shows it and lets it go, which is the only honest thing to do with a
+  // window onto something that is still running.
+  signal traced(string text)
+
   // The waterfall. Newest first, because the interesting line is always the
   // one that just happened, and it should not move once it has been read.
   property alias events: eventModel
@@ -244,6 +249,9 @@ Item {
       // What the assistant went looking for, in its words — shown as the
       // panel's own note, never as the user's line.
       root.queryText = String(message.text || "")
+      break
+    case "trace":
+      root.traced(String(message.text || ""))
       break
     case "answer":
       root.markdown = String(message.markdown || "")

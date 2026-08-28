@@ -135,6 +135,7 @@ Item {
     // Felt, not read: the figure buzzes the moment the assistant is talked
     // over, before the state has caught up.
     onBarged: wave.bargeIn()
+    onTraced: function (text) { under.push(text) }
     // Both commands are re-sent on connect, not just at open(): the socket
     // connects asynchronously, so anything sent from open() lands before
     // there is a socket to send it on and is silently dropped. That is what
@@ -315,6 +316,10 @@ Item {
             // thread and everything on screen. Bare N because the panel has
             // no text entry to compete with.
             client.reset()
+            // Including the working behind the figure. Leaving the last
+            // question's traces dissolving under a fresh conversation would be
+            // the one place this effect could mislead rather than reassure.
+            under.forget()
             event.accepted = true
           } else if (event.key === Qt.Key_Tab) {
             client.setBackend(client.backend === "codex" ? "claude" : "codex")
@@ -335,6 +340,18 @@ Item {
           Item {
             width: parent.width
             height: wave.implicitHeight + Style.space(16)
+
+            // Declared before the figure, so it is behind it. That ordering is
+            // the entire design: the text is meant to lose.
+            Undertext {
+              id: under
+              anchors.fill: parent
+              anchors.leftMargin: Style.spaceReal(10)
+              anchors.rightMargin: Style.spaceReal(10)
+              anchors.bottomMargin: Style.spaceReal(6)
+              working: client.voiceState === "thinking" || client.waiting
+              tint: root.hintGlow
+            }
 
             Waveform {
               id: wave

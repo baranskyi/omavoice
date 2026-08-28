@@ -148,6 +148,11 @@ class Daemon:
         self._play_queue: asyncio.Queue[bytes] = asyncio.Queue()
         self._play_task: asyncio.Task | None = None
 
+        # What the agent is doing, while it is doing it. Not kept and not
+        # replayed to a late-joining panel: it is a window onto a process that
+        # is happening now, and a trace from a question already answered would
+        # be a lie told quietly.
+        self.brain.watch(self._on_trace)
         self._prefs_path = cfg.state_dir / "preferences.json"
         self._load_preferences()
 
@@ -239,6 +244,19 @@ class Daemon:
             self.cfg.unrestricted = {
                 name for name in unrestricted if name in self.cfg.consented
             }
+
+    def _on_trace(self, text: str) -> None:
+        """One line of the agent's working, pushed straight to the panel.
+
+        Called from the pipe reader, so it must not await and must not raise.
+        `broadcast` already promises both.
+        """
+        self.server.broadcast(
+            {
+                "type": "trace",
+                "text": text if len(text) <= _MAX_EVENT_TEXT else text[:_MAX_EVENT_TEXT],
+            }
+        )
 
     # -- access ---------------------------------------------------------------
 

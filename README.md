@@ -450,6 +450,14 @@ draw a widget. Plainly, what it does:
   running as the same user can read it. An earlier version passed the key in
   through the environment and claimed it was visible only to the unit, which
   was not true.
+- **While the agent works, its own narration and the commands it runs appear
+  faintly behind the waveform.** They are streamed from `codex exec --json` as
+  the lines arrive, shown, and dropped — never stored, and never replayed to a
+  panel that opens later, since that would show someone an agent working on a
+  question answered minutes ago. Each line is trimmed to 180 characters, and
+  the ceiling on the pipe it comes from is unchanged. `claude -p` emits its
+  output as a single document at the end rather than a stream, so it has no
+  equivalent yet.
 - **What the agent hands back is bounded before it is kept.** The daemon runs
   for weeks and the agent it starts runs for a minute, so everything the short
   process writes would otherwise be held in the long one and pushed to the

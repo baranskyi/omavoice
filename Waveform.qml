@@ -165,7 +165,13 @@ Item {
       if (w <= 4 || h <= 4) return
 
       const cy = h / 2
-      const pad = Math.max(6, w * 0.045)
+      // Wider than it looks like it needs to be. This margin is the only
+      // room a displaced mark has before the Canvas clips it out of
+      // existence, and the scatter below now reaches about 4.8% of the span
+      // at full shock. At the old 4.5% the outermost points would have
+      // silently stopped being drawn at exactly the moment they were
+      // supposed to be flying.
+      const pad = Math.max(8, w * 0.060)
       const span = w - pad * 2
       const reach = h * 0.46
 
@@ -255,7 +261,7 @@ Item {
           // The buzz: a fine tremble at a frequency nothing else in the figure
           // uses, loudest in the middle and gone within a breath.
           if (buzz > 0) {
-            amp *= 1 + buzz * 0.58 * Math.sin(s * 47.0 + t * 33.0 + L)
+            amp *= 1 + buzz * 0.72 * Math.sin(s * 47.0 + t * 33.0 + L)
           }
 
           let px = pad + u * span
@@ -271,7 +277,12 @@ Item {
           // coming off each other, which is a different quantity entirely: the
           // coherent part shrinks a little and that energy goes into scatter.
           if (shock > 0.004) {
-            amp *= 1 - shock * 0.20
+            // Raised more than the scatter was, not less. Every number below
+            // pushes marks further from where they belong, and this is the
+            // one that pays for it: the body has to give up more room, or the
+            // extra throw lands past the edge of the canvas and simply is not
+            // drawn.
+            amp *= 1 - shock * 0.28
 
             // Two scales at once. Slices give it structure — a torn thing,
             // not a fuzzy one — and the per-point grain keeps the slices from
@@ -280,7 +291,7 @@ Item {
             const tear = root.scatter(slice * 7 + L * 131)
             const grain = root.scatter(i * 2749 + L * 9181 + roll * 31)
 
-            px += (tear * 0.052 + grain * 0.020) * span * shock
+            px += (tear * 0.068 + grain * 0.026) * span * shock
             jitter = grain * shock
           }
 
@@ -304,8 +315,8 @@ Item {
             // open along the centre line instead of shuddering as one piece.
             if (jitter !== 0) {
               const arm2 = root.scatter(i * 5051 + L * 313 + m * 78901 + roll * 17)
-              py += arm2 * shock * reach * 0.16
-              pxm += arm2 * shock * span * 0.012
+              py += arm2 * shock * reach * 0.21
+              pxm += arm2 * shock * span * 0.016
             }
 
             const strength = Math.min(1, Math.abs(yy) * 0.5 + env * 0.5)
@@ -313,7 +324,7 @@ Item {
             // Uneven marks. Points that survive a shock at full size next to
             // points that nearly vanish is most of what makes a field look
             // broken rather than merely displaced.
-            if (jitter !== 0) size *= 1 + jitter * 1.15
+            if (jitter !== 0) size *= 1 + jitter * 1.50
             if (size < 0.4) continue
 
             const alpha = Math.min(

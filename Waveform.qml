@@ -59,6 +59,32 @@ Item {
   property real buzz: 0
   function bargeIn() { root.buzz = 1.0 }
 
+  // How hard the voice just arrived, which is not the same as how loud it is.
+  //
+  // Loudness cannot be read here at all: the daemon sends min(1, rms/6000) and
+  // 6000 is ordinary speech, so a shout and a sentence both come through as
+  // 1.0. What survives that clamp is the *attack* — the level outrunning its
+  // own smoothed follower — and that is the thing worth reacting to anyway.
+  // Somebody starting to talk loudly is an event; somebody continuing to is a
+  // condition, and a figure that stayed violent for as long as you were loud
+  // would be exhausting.
+  property real surge: 0
+
+  // One number for "something just happened to this signal", whichever it was.
+  readonly property real shock: Math.max(root.buzz, root.surge)
+
+  // Deterministic scatter. An integer hash rather than Math.sin: this is
+  // evaluated per point, per layer, per frame, and the figure already spends
+  // 780 fills a frame in a process shared with the whole desktop bar.
+  function scatter(n) {
+    n = (n ^ 61) ^ (n >>> 16)
+    n = n + (n << 3)
+    n = n ^ (n >>> 4)
+    n = Math.imul(n, 0x27d4eb2d)
+    n = n ^ (n >>> 15)
+    return ((n >>> 0) % 1024) / 1024 - 0.5
+  }
+
   implicitWidth: Style.spaceReal(440)
   implicitHeight: Style.spaceReal(120)
 
@@ -91,6 +117,10 @@ Item {
       const src = root.bands || []
       const target = root.active ? root.level : 0
 
+      // Measured before the follower moves, or there is nothing to outrun.
+      const attack = Math.max(0, target - root.smoothLevel)
+      root.surge = Math.max(root.surge * 0.86, Math.min(1, attack * 2.8))
+
       root.smoothLevel = root.approach(root.smoothLevel, target, 0.5, 0.09)
       root.b0 = root.approach(root.b0, root.active ? (src[0] || 0) : 0, 0.45, 0.10)
       root.b1 = root.approach(root.b1, root.active ? (src[1] || 0) : 0, 0.45, 0.11)
@@ -107,8 +137,11 @@ Item {
         if (root.thinkHead > 1.4) root.thinkHead = -1.4
       }
 
-      if (root.buzz > 0.001) root.buzz *= 0.90
+      // Faster than it was. The tremble is meant to read as a flinch, and a
+      // flinch that takes a full second to subside is a wobble.
+      if (root.buzz > 0.001) root.buzz *= 0.87
       else root.buzz = 0
+      if (root.surge <= 0.002) root.surge = 0
 
       canvas.requestPaint()
     }
@@ -149,6 +182,10 @@ Item {
       // footing, rather than a calm figure in a different colour.
       const glitch = isError ? 1 : 0
       const buzz = root.buzz
+      const shock = root.shock
+      // Re-rolled every frame, so a disturbance grains rather than shifting a
+      // fixed pattern around. Coarser than the phase clock on purpose.
+      const roll = Math.floor(t * 97)
 
       // The figure has to be worth looking at in silence too — a listening
       // panel that shows a flat line reads as broken. So it keeps real
@@ -218,10 +255,35 @@ Item {
           // The buzz: a fine tremble at a frequency nothing else in the figure
           // uses, loudest in the middle and gone within a breath.
           if (buzz > 0) {
-            amp *= 1 + buzz * 0.45 * Math.sin(s * 47.0 + t * 26.0 + L)
+            amp *= 1 + buzz * 0.58 * Math.sin(s * 47.0 + t * 33.0 + L)
           }
 
           let px = pad + u * span
+          let jitter = 0
+
+          // A disturbance pulls the body apart rather than making it bigger.
+          //
+          // Bigger was the obvious move and it is the wrong one twice over.
+          // The envelope already uses about 95% of the height it is allowed —
+          // reach is h*0.46 against a centre line at h/2 — so more amplitude
+          // buys flat tops where the Canvas clips, and a clipped wave reads as
+          // weaker rather than stronger. And what was asked for is the points
+          // coming off each other, which is a different quantity entirely: the
+          // coherent part shrinks a little and that energy goes into scatter.
+          if (shock > 0.004) {
+            amp *= 1 - shock * 0.20
+
+            // Two scales at once. Slices give it structure — a torn thing,
+            // not a fuzzy one — and the per-point grain keeps the slices from
+            // reading as three rigid blocks sliding about.
+            const slice = Math.floor(u * 11) + roll
+            const tear = root.scatter(slice * 7 + L * 131)
+            const grain = root.scatter(i * 2749 + L * 9181 + roll * 31)
+
+            px += (tear * 0.052 + grain * 0.020) * span * shock
+            jitter = grain * shock
+          }
+
           if (glitch) {
             // Slices, not noise: a band of the figure jumps as a piece.
             const slice = Math.floor(u * 7) + Math.floor(t * 3)
@@ -235,10 +297,23 @@ Item {
             const yy = arm.skew === 0
               ? y
               : y * Math.cos(arm.skew) + Math.sin(s * 5.3 + lp + arm.skew) * 0.22
-            const py = cy + yy * amp * arm.scale
+            let py = cy + yy * amp * arm.scale
+            let pxm = px
+
+            // The two arms are torn apart separately, so the figure comes
+            // open along the centre line instead of shuddering as one piece.
+            if (jitter !== 0) {
+              const arm2 = root.scatter(i * 5051 + L * 313 + m * 78901 + roll * 17)
+              py += arm2 * shock * reach * 0.16
+              pxm += arm2 * shock * span * 0.012
+            }
 
             const strength = Math.min(1, Math.abs(yy) * 0.5 + env * 0.5)
-            const size = (1.3 + env * 2.2 + lvl * env * 2.6) * layerFade * arm.fade
+            let size = (1.3 + env * 2.2 + lvl * env * 2.6) * layerFade * arm.fade
+            // Uneven marks. Points that survive a shock at full size next to
+            // points that nearly vanish is most of what makes a field look
+            // broken rather than merely displaced.
+            if (jitter !== 0) size *= 1 + jitter * 1.15
             if (size < 0.4) continue
 
             const alpha = Math.min(
@@ -254,13 +329,13 @@ Item {
               cb + (1 - cb) * lift,
               alpha
             )
-            ctx.fillRect(px - size / 2, py - size / 2, size, size)
+            ctx.fillRect(pxm - size / 2, py - size / 2, size, size)
 
             // A soft halo under the brightest points, only where it shows.
             if (L === 0 && strength > 0.55) {
               const halo = size * 3.4
               ctx.fillStyle = Qt.rgba(cr, cg, cb, 0.07 * strength)
-              ctx.fillRect(px - halo / 2, py - halo / 2, halo, halo)
+              ctx.fillRect(pxm - halo / 2, py - halo / 2, halo, halo)
             }
           }
         }

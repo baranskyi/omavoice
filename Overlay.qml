@@ -12,6 +12,7 @@ pragma ComponentBehavior: Bound
 // looking at it is not a thing worth building.
 
 import QtQuick
+import QtQuick.Effects
 import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
@@ -32,6 +33,14 @@ Item {
   property bool helpOpen: false
   property bool consentOpen: false
   property string keyError: ""
+
+  // The hint line's travelling light borrows the figure's colour rather than
+  // choosing its own. Two marks saying "listening" in two different greens
+  // would be two languages for one fact, and the whole point of the palette
+  // living in StateHues is that neither of them gets to invent it.
+  StateHues { id: hues }
+  readonly property color hintGlow:
+    hues.colorFor(client.voiceState, Color.menu.background, Color.accent)
 
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "io.github.baranskyi.omavoice"
 
@@ -421,21 +430,111 @@ Item {
           anchors.right: parent.right
           height: Math.max(hint.implicitHeight, gear.implicitHeight)
 
-          Text {
-            id: hint
+          // The keys, with a light passing slowly behind them.
+          //
+          // A row of instructions at 35% opacity is the correct weight for
+          // something you read once and then stop seeing — but "stop seeing"
+          // is also how a person forgets that Q exists. A slow sweep gives the
+          // line one moment of legibility every few seconds without ever
+          // asking to be looked at, and it costs nothing at rest because the
+          // animation only runs while the panel is open.
+          //
+          // The light is masked by the glyphs themselves rather than drawn as
+          // a bar across them: the letters brighten as it passes, which is the
+          // difference between a shimmer and a scanline. Same technique the
+          // shell uses for its own reveals.
+          Item {
+            id: hintBox
             anchors.left: parent.left
             anchors.right: gear.left
             anchors.rightMargin: Style.spaceReal(8)
             anchors.verticalCenter: parent.verticalCenter
-            text: client.connected
+            height: hint.implicitHeight
+
+            readonly property string line: client.connected
               ? "Esc — background · I — interrupt · N — new · Q — stop · H — help"
               : "Start the daemon:  systemctl --user start omavoice"
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: Color.menu.text
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-            opacity: 0.35
+
+            Text {
+              id: hint
+              width: hintBox.width
+              text: hintBox.line
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+              opacity: 0.35
+            }
+
+            // The same glyphs again, in white and never shown: this is the
+            // shape the light is cut to.
+            Item {
+              id: hintMask
+              width: hintBox.width
+              height: hintBox.height
+              visible: false
+              layer.enabled: true
+
+              Text {
+                width: hintBox.width
+                text: hintBox.line
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: "white"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            Item {
+              width: hintBox.width
+              height: hintBox.height
+              visible: client.connected
+              layer.enabled: true
+              layer.smooth: true
+              layer.effect: MultiEffect {
+                maskEnabled: true
+                maskSource: hintMask
+                // These two numbers are the whole effect, and the intuitive
+                // reading of them is backwards. A wide spread does not soften
+                // the mask, it *defeats* it: at 0.02/0.60 the light came
+                // through as a plain rectangle sitting on the words, because
+                // almost every alpha value cleared the ramp. Tightened until
+                // the glyphs themselves carry the light, checked against a
+                // rendered frame rather than reasoned about.
+                maskThresholdMin: 0.20
+                maskSpreadAtMin: 0.25
+              }
+
+              Rectangle {
+                id: sweep
+                y: 0
+                height: hintBox.height
+                width: Math.max(Style.spaceReal(90), hintBox.width * 0.38)
+                gradient: Gradient {
+                  orientation: Gradient.Horizontal
+                  GradientStop { position: 0.0; color: "transparent" }
+                  GradientStop { position: 0.42; color: root.hintGlow }
+                  GradientStop { position: 0.58; color: root.hintGlow }
+                  GradientStop { position: 1.0; color: "transparent" }
+                }
+
+                // Slow, and with a rest between passes. A sweep that restarts
+                // the instant it finishes reads as a loading bar.
+                SequentialAnimation on x {
+                  running: root.opened && client.connected
+                  loops: Animation.Infinite
+                  NumberAnimation {
+                    from: -sweep.width
+                    to: hintBox.width
+                    duration: 4600
+                    easing.type: Easing.InOutSine
+                  }
+                  PauseAnimation { duration: 1900 }
+                }
+              }
+            }
           }
 
           Text {

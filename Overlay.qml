@@ -440,7 +440,10 @@ Item {
                 anchors.verticalCenter: parent.verticalCenter
                 text: root.logHidden ? "\uf070" : "\uf06e"
                 textFormat: Text.PlainText
-                color: root.logHidden ? Color.accent : Color.menu.text
+                // One colour in both states. The crossed-out glyph already
+                // says which one it is, and the accent means something else
+                // in this panel — it is the colour of things that are live.
+                color: Color.menu.text
                 opacity: eyeHover.hovered ? 1 : 0.85
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body

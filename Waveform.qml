@@ -90,6 +90,19 @@ Item {
 
   readonly property bool active: voiceState === "listening" || voiceState === "speaking"
 
+  // --- the light this thing throws --------------------------------------------
+  // How far the figure is swinging at each slice of its own width, 0..1, so
+  // whatever is drawn behind it can be lit by it. The threads are bright and
+  // they move; if they were real they would fall on what is underneath, hardest
+  // where the wave is loudest and barely at all out at the tapered ends.
+  //
+  // Published rather than computed twice: the shape comes out of four harmonics
+  // weighted by four bands and then a radial term, and a second implementation
+  // of that would be a second thing to keep true.
+  readonly property int slices: 14
+  property var light: new Array(14).fill(0)
+  property int lightTick: 0
+
   // --- smoothed inputs -------------------------------------------------------
   // Rises fast so a consonant registers on the frame it happens, falls slowly
   // so the figure glides down instead of collapsing between syllables.
@@ -174,6 +187,15 @@ Item {
       const pad = Math.max(8, w * 0.060)
       const span = w - pad * 2
       const reach = h * 0.46
+
+      // Two measures per slice, because one is not enough. The peak swing
+      // says how hard the wave is working there; the envelope says how much
+      // wave there is at all. Averaging the swing instead of peaking it put
+      // dead slices wherever a harmonic happened to cross zero, and the text
+      // came out barred rather than lit.
+      const peak = new Array(root.slices).fill(0)
+      const envs = new Array(root.slices).fill(0)
+      const hits = new Array(root.slices).fill(0)
 
       const t = root.phase
       const lvl = root.smoothLevel
@@ -340,6 +362,15 @@ Item {
               cb + (1 - cb) * lift,
               alpha
             )
+            // One layer, one arm: the profile wants the figure's shape, not
+            // three copies of it, and this is the loop everything else runs in.
+            if (L === 0 && m === 0) {
+              const b = Math.min(root.slices - 1, Math.floor(u * root.slices))
+              peak[b] = Math.max(peak[b], Math.abs(py - cy) / reach)
+              envs[b] += env
+              hits[b] += 1
+            }
+
             ctx.fillRect(pxm - size / 2, py - size / 2, size, size)
 
             // A soft halo under the brightest points, only where it shows.
@@ -350,6 +381,25 @@ Item {
             }
           }
         }
+      }
+
+      // Every third frame. The figure is redrawn sixty times a second and
+      // nothing reading this needs that: publishing each time would put a
+      // fresh array through a dozen bindings per line of text for no gain
+      // anyone can see.
+      root.lightTick += 1
+      if (root.lightTick % 3 === 0) {
+        const prev = root.light
+        const usable = prev && prev.length === root.slices
+        const next = new Array(root.slices)
+        for (let b = 0; b < root.slices; b++) {
+          const raw = hits[b] > 0
+            ? Math.min(1, 0.40 * (envs[b] / hits[b]) + 0.60 * Math.min(1, peak[b] * 2.2))
+            : 0
+          // Eased across frames, or the text under a consonant flickers.
+          next[b] = usable ? prev[b] * 0.72 + raw * 0.28 : raw
+        }
+        root.light = next
       }
     }
   }

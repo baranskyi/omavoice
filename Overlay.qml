@@ -32,12 +32,14 @@ Item {
   property bool settingsOpen: false
   property bool helpOpen: false
   property bool consentOpen: false
-  // Whether the waterfall and the answer are folded away, leaving the figure,
-  // the status line and the keys. Not persisted: it is a gesture for the
-  // conversation you are in — somebody is standing behind you, or the answer
-  // is long and you would rather watch the figure — and a panel that opened
-  // silently withholding its own history would be a worse default than the
-  // one it replaced.
+  // Whether the waterfall is folded away. The answer is not: that is the thing
+  // that was asked for, and hiding it along with the log was the eye doing more
+  // than it says. What goes is the running commentary — heard, asked, took 8s —
+  // which is worth having while you wait and clutter once you have the reply.
+  //
+  // Not persisted: it is a gesture for the conversation you are in, and a panel
+  // that opened silently withholding its own history would be a worse default
+  // than the one it replaced.
   property bool logHidden: false
   property string keyError: ""
 
@@ -271,8 +273,7 @@ Item {
         Style.space(620),
         card.contentTopInset + card.contentBottomInset
           + head.implicitHeight
-          + (!root.logHidden && middle.implicitHeight > 0
-              ? Style.spacing.panelGap + middle.implicitHeight : 0)
+          + (middle.implicitHeight > 0 ? Style.spacing.panelGap + middle.implicitHeight : 0)
           + (actions.visible ? Style.spacing.panelGap + actions.implicitHeight : 0)
           + Style.spacing.panelGap + footer.height
       )
@@ -359,6 +360,8 @@ Item {
               anchors.bottomMargin: Style.spaceReal(6)
               working: client.voiceState === "thinking" || client.waiting
               tint: root.hintGlow
+              // Lit by the figure drawn over it.
+              light: wave.light
             }
 
             Waveform {
@@ -438,7 +441,7 @@ Item {
                 text: root.logHidden ? "\uf070" : "\uf06e"
                 textFormat: Text.PlainText
                 color: root.logHidden ? Color.accent : Color.menu.text
-                opacity: root.logHidden ? 0.9 : (eyeHover.hovered ? 0.8 : 0.35)
+                opacity: eyeHover.hovered ? 1 : 0.85
                 font.family: Style.font.family
                 font.pixelSize: Style.font.body
                 Behavior on opacity { NumberAnimation { duration: 140 } }
@@ -610,8 +613,7 @@ Item {
           anchors.left: parent.left
           anchors.right: parent.right
           spacing: Style.spacing.sm
-          visible: !root.logHidden
-            && ((client.links && client.links.length > 0) || (client.files && client.files.length > 0))
+          visible: (client.links && client.links.length > 0) || (client.files && client.files.length > 0)
 
           Repeater {
             model: client.links
@@ -651,7 +653,6 @@ Item {
         // each other for the wheel, and the answer used to have its own.
         Flickable {
           id: scroller
-          visible: !root.logHidden
           anchors.top: head.bottom
           anchors.topMargin: Style.spacing.panelGap
           anchors.bottom: actions.top
@@ -671,7 +672,7 @@ Item {
             // --- the waterfall ----------------------------------------------
             EventLog {
               width: parent.width
-              visible: client.events.count > 0
+              visible: !root.logHidden && client.events.count > 0
               model: client.events
               pendingSince: client.pendingSince
               accent: Color.accent

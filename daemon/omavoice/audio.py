@@ -435,6 +435,17 @@ class Microphone:
         # clock rather than inferred from the process still being alive.
         self.chunks_total = 0
 
+    @property
+    def listening(self) -> bool:
+        """Is capture actually running right now?
+
+        Asked from outside when something needs to tell "somebody is sitting
+        here with the microphone open" apart from "a socket happens to still
+        be alive". The two are not the same, and only the first is a reason to
+        spend money reopening a connection.
+        """
+        return self._task is not None and not self._task.done()
+
     async def start(self) -> None:
         # `done()` matters as much as `is not None`. The pump task ends by
         # itself when it gives up on a device, and a finished task left in this

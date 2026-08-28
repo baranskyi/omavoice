@@ -119,6 +119,9 @@ class Daemon:
         # True after a stop: socket open and the conversation intact, but
         # nothing heard and nothing said.
         self.paused = False
+        # Set when the API closes a connection for having lasted an hour, so
+        # the teardown that follows can tell an ordinary ending from a fault.
+        self._session_expired = False
         self.autogain = AutoGain(chunk_ms=cfg.chunk_ms)
         self.devices: device_choice.Devices | None = None
         # Microphones that failed to produce audio while this daemon has been
@@ -663,6 +666,21 @@ class Daemon:
             if "no active response" in message or "buffer is empty" in message.lower():
                 log.debug("ignoring benign realtime error: %s", message)
                 return
+
+            # The one hour cap. The API ends a connection at sixty minutes and
+            # reports it down the same channel as a genuine fault, which is how
+            # a panel that had simply been left open all morning came to be
+            # sitting there saying "error" with nothing wrong.
+            #
+            # It is not a fault. It is the only ending we agreed OpenAI is
+            # entitled to, and the honest response is to say the hour is up
+            # rather than to colour the bar red.
+            if "maximum duration" in message.lower():
+                log.info("the API ended the session at its hour limit")
+                self._session_expired = True
+                self._emit("session", "an hour is the API's limit — this conversation ends here")
+                return
+
             log.error("realtime error: %s", message)
             self._emit("error", message)
             self.server.broadcast({"type": "error", "message": message})
@@ -752,7 +770,23 @@ class Daemon:
             self._set_state("error", message=str(exc))
         finally:
             if self.session is session:
+                expired = self._session_expired
+                self._session_expired = False
+                # Whether the microphone was open, asked before the teardown
+                # closes it: it is the difference between a person sitting
+                # here mid-sentence and a panel left open since this morning.
+                attended = self.mic.listening and not self.paused
                 await self.stop_session()
+                if expired and attended:
+                    # Carried on rather than handed back, because from where
+                    # the person is sitting nothing happened except that the
+                    # assistant forgot the last hour. Saying so is enough.
+                    self._emit("session", "reconnecting — the previous hour is forgotten")
+                    await self.start_session()
+                elif expired:
+                    # Nobody at the microphone. Reopening would spend another
+                    # hour of somebody's money on an empty room.
+                    self._set_state("idle")
 
     async def pause_session(self) -> dict:
         """Silence both directions and keep the conversation.

@@ -166,12 +166,14 @@ Item {
     open: root.consentOpen || (client.accessNeeded && root.opened)
     workspace: client.workspace
     consented: client.consented
+    unrestricted: client.unrestricted
     folders: client.folderChoices
     backend: client.backend
     onClosed: root.consentOpen = false
     onRefreshed: client.askAccess()
     onFolderPicked: function (path) { client.setWorkspace(path) }
     onConsentChanged: function (agent, granted) { client.setConsent(agent, granted) }
+    onUnrestrictChanged: function (agent, granted) { client.setUnrestricted(agent, granted) }
   }
 
   HelpWindow {
@@ -195,6 +197,7 @@ Item {
     keyError: root.keyError
     workspace: client.workspace
     consented: client.consented
+    unrestricted: client.unrestricted
     onClosed: root.settingsOpen = false
     onAccessRequested: {
       root.settingsOpen = false

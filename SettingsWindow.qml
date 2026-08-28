@@ -32,6 +32,7 @@ Item {
   property string keyError: ""
   property string workspace: ""
   property var consented: []
+  property var unrestricted: []
 
   signal closed()
   signal voicePicked(string name)
@@ -474,9 +475,13 @@ Item {
 
                 Text {
                   width: parent.width
-                  text: root.consented.length === 0
-                    ? "No agent is allowed to answer yet"
-                    : "Allowed: " + root.consented.join(", ")
+                  text: {
+                    if (root.consented.length === 0) return "No agent is allowed to answer yet"
+                    return "Allowed: " + root.consented.join(", ")
+                      + (root.unrestricted.length === 0
+                          ? " · held to the folder"
+                          : " · unrestricted: " + root.unrestricted.join(", "))
+                  }
                   textFormat: Text.PlainText
                   wrapMode: Text.Wrap
                   color: Color.menu.text

@@ -346,7 +346,10 @@ Item {
                   + "Which is also why it asks first. An agent is only ever "
                   + "started after you have named a folder for it to work in "
                   + "and allowed that particular agent by name — separately for "
-                  + "codex and for claude, once, in Settings under Access."
+                  + "codex and for claude, once, in Settings under Access.\n\n"
+                  + "Until you say otherwise, that folder is also as far as it "
+                  + "can read, and its connectors stay off. The same screen "
+                  + "lifts both, per agent, and says what lifting them means."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text

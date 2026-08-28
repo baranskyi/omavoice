@@ -22,8 +22,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import re
 import shutil
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -195,6 +197,56 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
         proc.kill()
     with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
         await asyncio.wait_for(proc.wait(), timeout=2)
+
+
+# The name of the permission profile we hand codex. Ours, built fresh on
+# every invocation and passed with -c, so the person's own ~/.codex/config.toml
+# is never touched and their ChatGPT login keeps working.
+_PROFILE = "omavoice"
+
+
+def _codex_root() -> str:
+    """Where the codex binary actually lives.
+
+    The profile is built by addition rather than subtraction — a `deny` beats a
+    more specific `read`, so "everything except" cannot be expressed — and that
+    means the sandbox starts with nothing and has to be told about the binary it
+    is going to run. Left out, codex cannot exec itself: `bwrap: execvp ...: No
+    such file or directory`, which reads as a broken agent rather than as a
+    missing path.
+    """
+    found = shutil.which("codex")
+    if not found:
+        return ""
+    # …/installs/codex/0.149.1/bin/codex -> …/installs/codex/0.149.1
+    return str(Path(found).resolve().parent.parent)
+
+
+def _codex_mcp_servers() -> list[str]:
+    """The MCP servers this person has configured for codex, by name.
+
+    There is no single switch for them. `mcp_servers={}` is accepted and
+    silently ignored — codex drops unknown shapes rather than complaining — but
+    naming each one and setting `enabled=false` does flip it to disabled. So
+    they have to be enumerated, and the config file is a steadier place to read
+    them from than the table `codex mcp list` prints.
+    """
+    home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
+    try:
+        with (home / "config.toml").open("rb") as handle:
+            data = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        log.debug("no codex config to read servers from: %s", exc)
+        return []
+    servers = data.get("mcp_servers")
+    if not isinstance(servers, dict):
+        return []
+    return [name for name in servers if isinstance(name, str) and name]
+
+
+def _toml_str(value: str) -> str:
+    """One TOML basic string. A folder name is not a safe thing to paste."""
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
 def _read_capped(path: Path, limit: int, what: str) -> str:
@@ -391,15 +443,28 @@ class Brain:
             # question, none ≈ 12 s (it compensates with more tool calls), and
             # minimal is rejected by the model outright.
             "-c", "model_reasoning_effort=low",
-            # Writes, not reads. Worth being exact, because the name suggests
-            # otherwise and we have said otherwise in our own documentation:
-            # under this sandbox codex refuses to create a file outside the
-            # workspace and still reads one without complaint — measured, not
-            # assumed. Reading is bounded by the consent screen and by --cd
-            # below, not by this flag.
-            "--sandbox", "read-only",
             "--cd", str(self.cfg.brain_cwd),
         ]
+
+        limits = self._codex_limits()
+        if limits:
+            # Deliberately no --sandbox here, and this is the whole trick.
+            #
+            # Passing that flag explicitly discards `default_permissions`: the
+            # profile is silently dropped and the agent reads the machine
+            # again. It cost a round of testing to find, because everything
+            # still looks right — codex even prints "sandbox: read-only" while
+            # ignoring the thing that was supposed to bound it.
+            #
+            # Losing the flag costs nothing. The profile grants `read` and
+            # nothing else, so writing is refused inside the folder as well as
+            # outside it ("Read-only file system"), and the sandbox has no
+            # network. It is the stronger of the two, not a substitute.
+            before += limits
+        else:
+            # Permitted mode: exactly the command line this had before any of
+            # the scoping existed. Writes still refused, reads unbounded.
+            before += ["--sandbox", "read-only"]
         after = [
             "--skip-git-repo-check",
             "--json",
@@ -445,6 +510,40 @@ class Brain:
         log.error("codex exited %s: %s", code, stderr[-400:])
         return Answer.error("Codex returned no answer.")
 
+    def _codex_limits(self) -> list[str]:
+        """The flags that hold codex to the chosen folder, or none at all.
+
+        Nothing here is a variation on the sandbox: `--sandbox read-only`
+        governs writing, and under it codex reads whatever it likes. What
+        bounds reading is the permission profile, and it is built here rather
+        than written into the person's config so that their own codex — their
+        model, their login, their settings — is left exactly as they set it up.
+
+        When the second permission has been given, this returns nothing. Not a
+        looser profile, not a wider list: the same command line the agent had
+        before any of this existed. A permitted mode that quietly differs from
+        what it replaced is a mode nobody can reason about.
+        """
+        if self.backend in self.cfg.unrestricted or self.cfg.brain_cwd is None:
+            return []
+
+        root = _codex_root()
+        readable = [_toml_str(":minimal") + ' = "read"']
+        if root:
+            readable.append(_toml_str(root) + ' = "read"')
+        readable.append(_toml_str(str(self.cfg.brain_cwd)) + ' = "read"')
+
+        flags = [
+            "-c", f"default_permissions={_toml_str(_PROFILE)}",
+            "-c", f"permissions.{_PROFILE}.filesystem={{{', '.join(readable)}}}",
+            # The model's own search tool, which runs at OpenAI rather than in
+            # the sandbox and is therefore untouched by anything above.
+            "-c", 'web_search="disabled"',
+        ]
+        for name in _codex_mcp_servers():
+            flags += ["-c", f"mcp_servers.{name}.enabled=false"]
+        return flags
+
     async def _ask_claude(self, query: str) -> Answer:
         # claude has no --output-schema, so the shape goes in the prompt and
         # _coerce cleans up whatever comes back.
@@ -480,12 +579,27 @@ class Brain:
         # and claude refused the run for having no prompt in it — which reaches
         # the person as "the agent is broken". So it is followed by an ordinary
         # flag, deliberately, and the question stays a positional argument.
-        argv = [
-            "claude", "-p",
-            "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit",
-            "--output-format", "json",
-            "--permission-mode", "plan",
-        ]
+        if self.backend in self.cfg.unrestricted:
+            argv = [
+                "claude", "-p",
+                "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit",
+                "--output-format", "json",
+                "--permission-mode", "plan",
+            ]
+        else:
+            # `plan` refuses a write by *asking*, and a question nobody can
+            # answer is a weaker thing than a refusal. `dontAsk` turns every
+            # such question into a denial, which is what makes the working
+            # directory an actual edge: a path outside it comes back refused
+            # rather than read. Measured, both ways round.
+            argv = [
+                "claude", "-p",
+                "--disallowedTools",
+                "Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,WebBrowser",
+                "--strict-mcp-config",
+                "--output-format", "json",
+                "--permission-mode", "dontAsk",
+            ]
         thread = self._threads.get("claude")
         if thread:
             argv += ["--resume", thread]

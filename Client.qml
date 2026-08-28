@@ -59,11 +59,16 @@ Item {
   // panel and the thing doing the refusing cannot disagree.
   property string workspace: ""
   property var consented: []
+  property var unrestricted: []
   property bool accessNeeded: false
   property var folderChoices: []
 
   function backendAllowed(name) {
     return root.consented.indexOf(String(name)) >= 0
+  }
+
+  function backendUnrestricted(name) {
+    return root.unrestricted.indexOf(String(name)) >= 0
   }
 
   signal answered()
@@ -145,6 +150,9 @@ Item {
   function setConsent(name, granted) {
     return send({ cmd: "consent", backend: String(name), granted: granted === true })
   }
+  function setUnrestricted(name, granted) {
+    return send({ cmd: "unrestrict", backend: String(name), granted: granted === true })
+  }
   function askAccess() { return send({ cmd: "access", id: 7 }) }
 
   function clearConversation() {
@@ -198,6 +206,7 @@ Item {
     case "access":
       root.workspace = String(message.workspace || "")
       root.consented = Array.isArray(message.consented) ? message.consented : []
+      root.unrestricted = Array.isArray(message.unrestricted) ? message.unrestricted : []
       root.accessNeeded = message.needed === true
       if (Array.isArray(message.folders)) root.folderChoices = message.folders
       break

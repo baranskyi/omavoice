@@ -32,16 +32,22 @@ Item {
   property bool open: false
   property string workspace: ""
   property var consented: []
+  property var unrestricted: []
   property var folders: []
   property string backend: "codex"
 
   signal closed()
   signal folderPicked(string path)
   signal consentChanged(string agent, bool granted)
+  signal unrestrictChanged(string agent, bool granted)
   signal refreshed()
 
   function allowed(name) {
     return root.consented.indexOf(String(name)) >= 0
+  }
+
+  function unbounded(name) {
+    return root.unrestricted.indexOf(String(name)) >= 0
   }
 
   onOpenChanged: if (open) {
@@ -57,8 +63,11 @@ Item {
     required property string agent
     required property string detail
     required property bool granted
+    required property bool wide
+    required property string wideDetail
 
     signal toggled(bool value)
+    signal widened(bool value)
 
     width: parent ? parent.width : 0
     height: grantBody.implicitHeight + Style.spaceReal(22)
@@ -126,6 +135,62 @@ Item {
         opacity: 0.55
         font.family: Style.font.family
         font.pixelSize: Style.font.caption
+      }
+
+      // The second question, and only once the first has an answer. How far
+      // an agent may go is a question about nothing until it may speak at all.
+      Column {
+        width: parent.width
+        visible: grant.granted
+        spacing: Style.spaceReal(7)
+
+        Rectangle {
+          width: parent.width
+          height: 1
+          color: Qt.rgba(Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.12)
+        }
+
+        Row {
+          id: wideRow
+          width: parent.width
+          spacing: Style.spaceReal(10)
+
+          Text {
+            anchors.verticalCenter: parent.verticalCenter
+            width: wideRow.width - wideButton.width - wideRow.spacing
+            text: grant.wide
+              ? "Using everything it can — connectors, the web, the whole machine."
+              : "Held to the folder above. Nothing outside it can be read."
+            textFormat: Text.PlainText
+            wrapMode: Text.Wrap
+            color: grant.wide ? Color.urgent : Color.menu.text
+            opacity: grant.wide ? 0.85 : 0.55
+            font.family: Style.font.family
+            font.pixelSize: Style.font.caption
+          }
+
+          Button {
+            id: wideButton
+            anchors.verticalCenter: parent.verticalCenter
+            text: grant.wide ? "Hold to folder" : "Allow everything"
+            bordered: true
+            foreground: Color.menu.text
+            accent: Color.accent
+            fontFamily: Style.font.family
+            onClicked: grant.widened(!grant.wide)
+          }
+        }
+
+        Text {
+          width: parent.width
+          text: grant.wideDetail
+          textFormat: Text.PlainText
+          wrapMode: Text.Wrap
+          color: Color.menu.text
+          opacity: 0.4
+          font.family: Style.font.family
+          font.pixelSize: Style.font.caption
+        }
       }
     }
   }
@@ -261,9 +326,9 @@ Item {
               width: parent.width
               text: "The agent starts here and treats it as the work at hand, "
                   + "instead of starting in your home directory as it used to. "
-                  + "It decides what a question is about — not, on its own, what "
-                  + "the agent is able to read. The two paragraphs below say "
-                  + "exactly what each one enforces."
+                  + "Unless you widen an agent below, this is also the limit of "
+                  + "what it can read: everything else on the machine is simply "
+                  + "not there."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text
@@ -386,31 +451,42 @@ Item {
             Grant {
               agent: "codex"
               granted: root.allowed("codex")
-              detail: "Runs on your ChatGPT subscription with everything your own "
-                    + "codex configuration gives it. Started in the folder above, "
-                    + "and it cannot write anywhere at all. Its sandbox bounds "
-                    + "writing and not reading, so a question that leads to a "
-                    + "file elsewhere on this machine will reach one."
+              wide: root.unbounded("codex")
+              detail: "Runs on your ChatGPT subscription. It cannot write "
+                    + "anything, anywhere, in either setting below."
+              wideDetail: root.unbounded("codex")
+                ? "Your own codex configuration applies in full: its MCP "
+                  + "servers, its web search, and the rest of this machine."
+                : "Reading is confined by a permission profile built for this "
+                  + "one question — a path outside the folder does not exist "
+                  + "as far as the agent is concerned. Your MCP servers and "
+                  + "web search stay off while it is held here."
               onToggled: function (value) { root.consentChanged("codex", value) }
+              onWidened: function (value) { root.unrestrictChanged("codex", value) }
             }
 
             Grant {
               agent: "claude"
               granted: root.allowed("claude")
-              detail: "Brings your skills and MCP connectors — mail, calendar, "
-                    + "whatever else you have connected. Started in the folder "
-                    + "above, and it cannot edit or create files. It can read "
-                    + "past the folder in the same way codex can."
+              wide: root.unbounded("claude")
+              detail: "Brings your skills and connectors. It cannot write or "
+                    + "edit anything in either setting below."
+              wideDetail: root.unbounded("claude")
+                ? "Your skills and MCP connectors apply in full — mail, "
+                  + "calendar, whatever else you have connected — along with "
+                  + "the web and the rest of this machine."
+                : "A path outside the folder is refused rather than read, and "
+                  + "its MCP servers and web tools stay switched off while it "
+                  + "is held here."
               onToggled: function (value) { root.consentChanged("claude", value) }
+              onWidened: function (value) { root.unrestrictChanged("claude", value) }
             }
 
             Text {
               width: parent.width
-              text: "Those two paragraphs were measured rather than assumed — "
-                  + "both agents were handed a file outside the folder to see "
-                  + "what they would do with it. So the permission above is the "
-                  + "control that means something, and it is why nothing at all "
-                  + "is asked of an agent you have not allowed.\n\n"
+              text: "Every line above was measured rather than assumed: each "
+                  + "agent was handed a file outside the folder, in both "
+                  + "settings, to see what it would actually do with it.\n\n"
                   + "Nothing is sent anywhere except OpenAI, for the voice, and "
                   + "the agent you allowed."
               textFormat: Text.PlainText

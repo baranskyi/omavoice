@@ -187,6 +187,7 @@ class Daemon:
                         # is entitled to infer them.
                         "workspace": str(self.cfg.brain_cwd or ""),
                         "consented": sorted(self.cfg.consented),
+                        "unrestricted": sorted(self.cfg.unrestricted),
                     },
                     indent=2,
                 )
@@ -230,6 +231,14 @@ class Daemon:
             self.cfg.consented = {
                 name for name in consented if name in ("codex", "claude")
             }
+        unrestricted = data.get("unrestricted")
+        if isinstance(unrestricted, list):
+            # Only for an agent that is allowed at all. The wider permission is
+            # meaningless without the narrower one, and a file edited by hand
+            # should not be able to assemble a state the screen cannot show.
+            self.cfg.unrestricted = {
+                name for name in unrestricted if name in self.cfg.consented
+            }
 
     # -- access ---------------------------------------------------------------
 
@@ -244,6 +253,7 @@ class Daemon:
             "type": "access",
             "workspace": str(self.cfg.brain_cwd or ""),
             "consented": sorted(self.cfg.consented),
+            "unrestricted": sorted(self.cfg.unrestricted),
             # Named so the panel can raise the consent screen by itself rather
             # than working the condition out again and getting it half right.
             "needed": bool(self.brain.denial()),
@@ -1110,6 +1120,8 @@ class Daemon:
                 self.cfg.consented.add(name)
             else:
                 self.cfg.consented.discard(name)
+                # Withdrawing the first permission takes the second with it.
+                self.cfg.unrestricted.discard(name)
             self._save_preferences()
             # Withdrawing is not only about the next question. The thread this
             # agent was holding is the record of the previous ones.
@@ -1119,11 +1131,35 @@ class Daemon:
             self._broadcast_access()
             return {"ok": True, **self._access()}
 
+        if command == "unrestrict":
+            # The second permission: everything this agent can normally do,
+            # rather than only the folder. Refused for an agent that has not
+            # been allowed at all, because the screen offers them in that order
+            # and a state it cannot draw is a state nobody can withdraw.
+            name = str(message.get("backend") or "")
+            if name not in ("codex", "claude"):
+                return {"ok": False, "error": f"unknown agent: {name}"}
+            granted = bool(message.get("granted"))
+            if granted and name not in self.cfg.consented:
+                return {"ok": False, "error": f"{name} is not allowed to answer yet"}
+            if granted:
+                self.cfg.unrestricted.add(name)
+            else:
+                self.cfg.unrestricted.discard(name)
+            self._save_preferences()
+            # The command line changes, and codex will not resume a thread that
+            # was started under a different one.
+            self.brain.reset()
+            self._emit("access", f"{name} · {'unrestricted' if granted else 'held to the folder'}")
+            self._broadcast_access()
+            return {"ok": True, **self._access()}
+
         if command == "status":
             return {
                 "ok": True,
                 "workspace": str(self.cfg.brain_cwd or ""),
                 "consented": sorted(self.cfg.consented),
+                "unrestricted": sorted(self.cfg.unrestricted),
                 "state": self.state,
                 "backend": self.brain.backend,
                 "voice": self.cfg.voice,

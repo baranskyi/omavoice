@@ -405,23 +405,40 @@ draw a widget. Plainly, what it does:
   Realtime API. The microphone is released the moment the panel goes to the
   background or the session ends.
 - **Nothing is asked of an agent until you have said so.** On first run the
-  panel asks two questions and refuses every request until both are answered:
-  which folder the assistant works in, and which agent — `codex`, `claude`, or
-  both, named separately — is allowed to answer at all. Both live in Settings ▸
-  Access afterwards, and either can be withdrawn. `omavoice-ctl access`,
-  `workspace`, `allow` and `revoke` do the same from a terminal.
-- **It runs `codex` or `claude` as a subprocess** in the folder you named, and
-  neither can write: codex under `--sandbox read-only`, claude under
-  `--permission-mode plan` with `Write`, `Edit`, `MultiEdit` and `NotebookEdit`
-  denied outright. Speech is too easy to get wrong, and transcription adds its
-  own error on top.
-- **The folder is where the agent works, not a wall around what it can read.**
-  Worth stating exactly, because the flags read as though it were: codex's
-  read-only sandbox bounds writing and not reading, and claude in plan mode
-  will read a path outside the folder as readily as one inside it. Both were
-  measured against a file placed outside, not assumed from the documentation.
-  The control that means something is therefore the permission itself — an
-  agent you have not allowed is never started, with any question.
+  panel asks for a folder and for permission, and refuses every request until
+  both are answered. Permission is per agent, by name — allowing `codex` says
+  nothing about `claude`. Both live in Settings ▸ Access afterwards and either
+  can be withdrawn; `omavoice-ctl access`, `workspace`, `allow` and `revoke` do
+  the same from a terminal.
+- **By default the folder is a wall, not a hint.** A path outside it is not
+  read:
+
+  - `codex` runs under a permission profile built for that one invocation and
+    passed with `-c`, so your own `~/.codex/config.toml` and ChatGPT login are
+    untouched. It grants `read` on the folder and on nothing else, which also
+    makes the whole filesystem unwritable and leaves the sandbox with no
+    network. A path outside the folder does not merely fail — it does not
+    exist.
+  - `claude` runs under `--permission-mode dontAsk` with `--strict-mcp-config`
+    and the write and web tools denied by name. Plan mode was not enough: it
+    refuses by *asking*, and a question nobody can answer is weaker than a
+    refusal.
+
+  Note for anyone reading the code: in bounded mode codex is deliberately
+  **not** given `--sandbox read-only`. Passing that flag discards
+  `default_permissions` and silently drops the profile, while still printing
+  `sandbox: read-only`. The profile is the stronger of the two.
+- **Everything above is measured, not quoted.** Each agent was handed a file
+  outside the folder, in both settings, to see what it actually did. That is
+  also how the previous version's "read-only" claim was found to be a claim
+  about writing only.
+- **You can lift it, per agent, and it says so plainly.** The second permission
+  in the same screen — `omavoice-ctl unrestrict <agent>`, undone with
+  `restrict` — hands the agent everything it can normally do: your MCP
+  connectors, its web search, the rest of the machine. It is off until you
+  turn it on, and turning it on is what the screen describes rather than what
+  it hides. In that mode the command line is exactly what it was before any of
+  this scoping existed, so there is no second configuration to drift.
 - **Requests that consist of a destructive command** (`rm -rf`, `mkfs`,
   `shutdown`) never reach the agent.
 - **The key** lives in `~/.config/omavoice/key`, mode `600`, in a file of its

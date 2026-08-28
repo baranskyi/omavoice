@@ -161,6 +161,16 @@ class Config:
     # program and do not reach the same things: granting codex says nothing
     # about what claude has been connected to.
     consented: set[str] = field(default_factory=set)
+    # And which of those have been let off the leash as well: allowed to use
+    # everything they can normally do — their connectors, their MCP servers,
+    # the web, and the rest of the machine — rather than only the folder.
+    #
+    # A second question rather than a bigger first one. The two are not the
+    # same decision: "this agent may answer me" is about trusting the agent,
+    # and "it may go anywhere" is about what a misheard sentence can reach.
+    # Empty by default, so a fresh install is bounded until someone says
+    # otherwise in as many words.
+    unrestricted: set[str] = field(default_factory=set)
 
     # --- plumbing ----------------------------------------------------------
     socket_path: Path = field(default_factory=lambda: _runtime_dir() / "omavoice.sock")

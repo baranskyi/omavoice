@@ -94,6 +94,14 @@ def main() -> int:
     revoke = sub.add_parser("revoke", help="withdraw an agent's permission")
     revoke.add_argument("name", choices=("codex", "claude"))
 
+    unrestrict = sub.add_parser(
+        "unrestrict", help="let an agent use everything it can, not only the folder"
+    )
+    unrestrict.add_argument("name", choices=("codex", "claude"))
+
+    restrict = sub.add_parser("restrict", help="hold an agent to the chosen folder again")
+    restrict.add_argument("name", choices=("codex", "claude"))
+
     args = parser.parse_args()
 
     if args.command == "ask":
@@ -108,6 +116,10 @@ def main() -> int:
         return asyncio.run(_send({"cmd": "consent", "backend": args.name, "granted": True}))
     if args.command == "revoke":
         return asyncio.run(_send({"cmd": "consent", "backend": args.name, "granted": False}))
+    if args.command == "unrestrict":
+        return asyncio.run(_send({"cmd": "unrestrict", "backend": args.name, "granted": True}))
+    if args.command == "restrict":
+        return asyncio.run(_send({"cmd": "unrestrict", "backend": args.name, "granted": False}))
     if args.command == "voice":
         if not args.name:
             from .config import VOICES

@@ -33,9 +33,12 @@ Item {
   clip: true
 
   // Older lines are nearer the top and fainter; the newest is being typed at
-  // the bottom. Four is enough to read as activity and few enough that the
-  // figure is never fighting a wall of text.
-  readonly property int keep: 4
+  // the bottom. As many as the block will hold, so the working fills the space
+  // behind the figure rather than pooling under its waist — the figure is
+  // widest in the middle, and text that stops at the centre line reads as a
+  // second panel rather than as something showing through.
+  readonly property int lineStep: Math.max(1, Style.font.caption + Style.spaceReal(2))
+  readonly property int keep: Math.max(4, Math.min(14, Math.floor(root.height / root.lineStep)))
   ListModel { id: lines }
 
   // Characters per tick. Fast enough to keep up with an agent that says a
@@ -45,10 +48,16 @@ Item {
 
   property real dissolve: 1.0
 
+  // Pixels a line climbs per tick. Slow enough that a line crosses the block
+  // in about twenty seconds, which is roughly how long the agent takes — so a
+  // question's working occupies the height once and drifts off the top as the
+  // answer arrives, rather than piling up at the bottom waiting to be pushed.
+  readonly property real drift: Math.max(0.15, root.height / 520)
+
   function push(text) {
     const clean = String(text || "").replace(/\s+/g, " ").trim()
     if (clean === "") return
-    lines.append({ body: clean, shown: 0, age: 0 })
+    lines.append({ body: clean, shown: 0, rise: 0 })
     while (lines.count > root.keep) lines.remove(0)
     root.dissolve = 1.0
   }
@@ -67,12 +76,16 @@ Item {
     onTriggered: {
       // Only the last line types; the ones above it are finished by
       // definition, because a new line only ever arrives after them.
-      for (let i = 0; i < lines.count; i++) {
+      for (let i = lines.count - 1; i >= 0; i--) {
         const row = lines.get(i)
         if (row.shown < row.body.length) {
           lines.setProperty(i, "shown", Math.min(row.body.length, row.shown + root.speed))
         }
-        lines.setProperty(i, "age", row.age + 1)
+        // Everything rises, always — a line does not wait to be pushed up by
+        // the next one. That waiting was what kept the whole thing pooled
+        // along the bottom edge instead of living in the block.
+        lines.setProperty(i, "rise", row.rise + root.drift)
+        if (row.rise > root.height) lines.remove(i)
       }
 
       // The dissolve. Not a clear: the working that produced an answer should
@@ -87,41 +100,34 @@ Item {
     }
   }
 
-  Column {
-    id: stack
-    anchors.left: parent.left
-    anchors.right: parent.right
-    anchors.bottom: parent.bottom
-    spacing: Style.spaceReal(2)
+  Repeater {
+    model: lines
 
-    // The whole stack slides up as lines arrive, which is what makes the
-    // oldest one leave rather than simply stop being drawn.
-    add: Transition { NumberAnimation { properties: "y"; duration: 420; easing.type: Easing.OutCubic } }
-    move: Transition { NumberAnimation { properties: "y"; duration: 420; easing.type: Easing.OutCubic } }
+    Text {
+      id: row
+      required property string body
+      required property int shown
+      required property real rise
 
-    Repeater {
-      model: lines
+      width: root.width
+      // Each line owns its height in the block. Placed rather than stacked,
+      // because a Column would tie every line's position to the arrival of
+      // the next one, and the point is that they move on their own.
+      y: root.height - root.lineStep - row.rise
+      text: row.body.substring(0, row.shown)
+      textFormat: Text.PlainText
+      elide: Text.ElideRight
+      maximumLineCount: 1
+      color: root.tint
+      font.family: Style.font.family
+      font.pixelSize: Style.font.caption
 
-      Text {
-        id: row
-        required property string body
-        required property int shown
-        required property int index
-
-        width: stack.width
-        text: row.body.substring(0, row.shown)
-        textFormat: Text.PlainText
-        elide: Text.ElideRight
-        maximumLineCount: 1
-        color: root.tint
-        font.family: Style.font.family
-        font.pixelSize: Style.font.caption
-
-        // Faint, and fainter the older it is. The newest line is the only one
-        // meant to be legible at all, and even that one only just.
-        opacity: root.dissolve * Math.max(0, 0.17 - (lines.count - 1 - row.index) * 0.038)
-        Behavior on opacity { NumberAnimation { duration: 260 } }
-      }
+      // Brightest where it appears, gone by the time it reaches the top. The
+      // curve is steep enough that the upper half of the block only ever
+      // carries a suggestion of text.
+      readonly property real travelled:
+        Math.max(0, Math.min(1, row.rise / Math.max(1, root.height)))
+      opacity: root.dissolve * 0.17 * Math.pow(1 - row.travelled, 1.7)
     }
   }
 }

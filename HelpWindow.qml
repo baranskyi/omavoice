@@ -69,6 +69,45 @@ Item {
     }
   }
 
+  StateHues { id: hues }
+
+  // One state of the crystal: the mark, in the colour it actually uses.
+  component Hue: Row {
+    id: hue
+    required property string state
+    required property string name
+    required property string what
+    width: parent ? parent.width : 0
+    spacing: Style.spaceReal(10)
+
+    Rectangle {
+      width: Style.spaceReal(9)
+      height: Style.spaceReal(9)
+      anchors.verticalCenter: parent.verticalCenter
+      color: hues.colorFor(hue.state, Color.menu.background, Color.accent)
+    }
+
+    Text {
+      width: Style.spaceReal(88)
+      text: hue.name
+      textFormat: Text.PlainText
+      color: hues.colorFor(hue.state, Color.menu.background, Color.accent)
+      font.family: Style.font.family
+      font.pixelSize: Style.font.body
+    }
+
+    Text {
+      width: hue.width - Style.spaceReal(117)
+      text: hue.what
+      textFormat: Text.PlainText
+      wrapMode: Text.Wrap
+      color: Color.menu.text
+      opacity: 0.75
+      font.family: Style.font.family
+      font.pixelSize: Style.font.body
+    }
+  }
+
   // A node in the diagram.
   component Node: Rectangle {
     id: node
@@ -266,29 +305,21 @@ Item {
 
               KeyRow {
                 key: "Esc"
-                what: "Puts the panel away and stops nothing. The microphone "
-                    + "stays open, the conversation carries on, the answer is "
-                    + "still spoken. A click outside the panel does the same."
+                what: "Puts the panel away and stops nothing. A click outside "
+                    + "does the same."
               }
               KeyRow {
                 key: "Q"
-                what: "Stops. The microphone is released, whatever the "
-                    + "assistant was saying is cut off, and a question the "
-                    + "agent is still working on is abandoned — but the "
-                    + "conversation is kept, and opening the panel again picks "
-                    + "it up where it left off."
+                what: "Stops listening and speaking. The conversation is kept."
               }
               KeyRow {
                 key: "N"
-                what: "A new conversation. Everything said so far is "
-                    + "forgotten — by the voice, by the agent, and by this "
-                    + "panel."
+                what: "A new conversation. Everything said so far is forgotten."
               }
               KeyRow {
                 key: "I"
-                what: "Interrupts an answer that is running long, without "
-                    + "leaving the conversation. Talking over it does the "
-                    + "same thing."
+                what: "Cuts off an answer running long. Talking over it does "
+                    + "the same."
               }
               KeyRow {
                 key: "H"
@@ -298,27 +329,55 @@ Item {
 
             Text {
               width: parent.width
-              text: "Q is also on the crystal in the bar: right-click it to stop "
-                  + "listening without opening the panel first. The glow is what "
-                  + "tells you the microphone is open, so the way to close it is "
-                  + "on the same mark."
+              text: "Plain letters, because the panel takes the keyboard while "
+                  + "it is open. Q is also on the crystal in the bar: "
+                  + "right-click it to stop without opening anything."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text
-              opacity: 0.55
+              opacity: 0.45
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
 
+            PanelSectionHeader { width: parent.width; text: "The crystal in the bar" }
+
             Text {
               width: parent.width
-              text: "All of them are plain letters, because the panel takes the "
-                  + "keyboard for itself while it is open — a combination "
-                  + "assigned elsewhere on the desktop would simply vanish here."
+              text: "It is a status light. The colour is the state; a halo "
+                  + "around it means the microphone is open — whether or not "
+                  + "the panel is on screen."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text
-              opacity: 0.4
+              opacity: 0.75
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+            }
+
+            Column {
+              width: parent.width
+              spacing: Style.spaceReal(9)
+
+              // Named by state and not by colour. The swatch already says
+              // which colour it is, and two of these are close enough that
+              // reading "green" beside a green square and "resting" beside
+              // another one is a puzzle rather than a legend.
+              Hue { state: "idle";      name: "resting";   what: "Nothing running." }
+              Hue { state: "listening"; name: "listening"; what: "Open, and hearing you." }
+              Hue { state: "thinking";  name: "thinking";  what: "Away, asking the agent." }
+              Hue { state: "speaking";  name: "speaking";  what: "Its turn to talk." }
+              Hue { state: "error";     name: "broken";    what: "The connection went. N starts over." }
+            }
+
+            Text {
+              width: parent.width
+              text: "Left-click opens the panel, middle-click switches agent, "
+                  + "right-click stops."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              opacity: 0.45
               font.family: Style.font.family
               font.pixelSize: Style.font.caption
             }
@@ -327,12 +386,10 @@ Item {
 
             Text {
               width: parent.width
-              text: "The voice keeps the whole conversation on its connection "
-                  + "and sends it again with every turn, so a discussion gets "
-                  + "steadily more expensive the longer it runs — the length "
-                  + "is charged, not just the talking.\n\n"
-                  + "Press N when the subject changes. It costs a second to "
-                  + "reconnect and takes the running total back to nothing."
+              text: "The voice re-sends the whole conversation every turn, so "
+                  + "the length is charged and not just the talking. Press N "
+                  + "when the subject changes: a second to reconnect, and the "
+                  + "running total goes back to nothing."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text
@@ -345,25 +402,16 @@ Item {
 
             Text {
               width: parent.width
-              text: "The voice is OpenAI's Realtime API. It hears you and "
-                  + "speaks, and that is all it does — its instructions forbid "
-                  + "it from answering questions of fact.\n\n"
-                  + "Everything with substance goes to the agent already "
-                  + "installed on this machine: codex or claude, whichever is "
-                  + "selected. It reads and reports; neither one can write, "
-                  + "edit or delete anything.\n\n"
-                  + "That means whatever the agent can already reach, this can "
-                  + "use — your files and projects, and the connectors set up "
-                  + "for it: mail, calendar, MCP servers, the rest. Nothing "
-                  + "was configured twice. Asking out loud reaches the same "
-                  + "assistant you have been typing to.\n\n"
-                  + "Which is also why it asks first. An agent is only ever "
-                  + "started after you have named a folder for it to work in "
-                  + "and allowed that particular agent by name — separately for "
-                  + "codex and for claude, once, in Settings under Access.\n\n"
-                  + "Until you say otherwise, that folder is also as far as it "
-                  + "can read, and its connectors stay off. The same screen "
-                  + "lifts both, per agent, and says what lifting them means."
+              text: "The voice is OpenAI's Realtime API. It hears and speaks, "
+                  + "and is forbidden from answering questions of fact — those "
+                  + "go to codex or claude, already installed here. Whatever "
+                  + "that agent can reach, this can use.\n\n"
+                  + "Which is why it asks first: an agent is started only after "
+                  + "you name a folder and allow that agent by name, in "
+                  + "Settings ▸ Access. Until you widen it there, the folder is "
+                  + "also as far as it can read.\n\n"
+                  + "While it works, its own narration shows faintly behind the "
+                  + "figure."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text
@@ -407,10 +455,8 @@ Item {
 
             Text {
               width: parent.width
-              text: "Splitting it this way is what makes the assistant local, "
-                  + "and what keeps it cheap: the audio tokens — by far the "
-                  + "expensive ones — are spent on speech rather than on "
-                  + "thinking."
+              text: "Splitting it this way is what keeps it cheap: the audio "
+                  + "tokens are spent on speech rather than on thinking."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text

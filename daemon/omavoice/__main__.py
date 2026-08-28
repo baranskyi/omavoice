@@ -25,6 +25,7 @@ import sys
 import time
 
 import json
+from pathlib import Path
 
 from . import config, devices as device_choice, ipc
 from .audio import (
@@ -44,6 +45,10 @@ log = logging.getLogger("omavoice")
 # The waveform redraws at 20 fps. Every 20 ms chunk would be four times that
 # for no visible benefit, and each one is a socket write per connected client.
 _LEVEL_INTERVAL = 0.05
+
+# A waterfall line is a sentence. Anything past this is not a longer line,
+# it is a backend or a transcriber having a bad day at our expense.
+_MAX_EVENT_TEXT = 4000
 
 # While the assistant is speaking, the bar for what counts as speech goes up.
 # The echo canceller measures about -41 dB on this hardware, but it converges
@@ -171,6 +176,14 @@ class Daemon:
                         "backend": self.brain.backend,
                         # "" means follow the system; see devices.resolve.
                         "input": self.cfg.input_target,
+                        # The folder the agent works in, and which backends
+                        # have been allowed to answer at all. Both are answers
+                        # to a question the person was asked in plain words,
+                        # which is why they are stored as given rather than
+                        # derived from anything: nothing else in this program
+                        # is entitled to infer them.
+                        "workspace": str(self.cfg.brain_cwd or ""),
+                        "consented": sorted(self.cfg.consented),
                     },
                     indent=2,
                 )
@@ -194,6 +207,71 @@ class Daemon:
         if not os.environ.get("OMAVOICE_INPUT"):
             self.cfg.input_target = str(data.get("input") or "")
 
+        # A folder can be deleted, renamed, or live on a disk that is not
+        # mounted this morning. Checking it here rather than trusting the file
+        # matters more than it looks: an agent started in a directory that no
+        # longer exists does not fail loudly, it starts somewhere else.
+        if self.cfg.brain_cwd is None:
+            remembered = str(data.get("workspace") or "")
+            if remembered:
+                folder = Path(remembered).expanduser()
+                if folder.is_dir():
+                    self.cfg.brain_cwd = folder
+                else:
+                    log.warning(
+                        "the folder %s is gone — asking again before anything is asked "
+                        "of the agent", remembered,
+                    )
+        consented = data.get("consented")
+        if isinstance(consented, list):
+            self.cfg.consented = {
+                name for name in consented if name in ("codex", "claude")
+            }
+
+    # -- access ---------------------------------------------------------------
+
+    def _access(self) -> dict:
+        """What the person has agreed to, as the panel needs to see it.
+
+        One message rather than two, because the two halves are not
+        independent: a permission is a permission to work *somewhere*, and
+        showing either without the other invites agreeing to the wrong thing.
+        """
+        return {
+            "type": "access",
+            "workspace": str(self.cfg.brain_cwd or ""),
+            "consented": sorted(self.cfg.consented),
+            # Named so the panel can raise the consent screen by itself rather
+            # than working the condition out again and getting it half right.
+            "needed": bool(self.brain.denial()),
+        }
+
+    def _broadcast_access(self) -> None:
+        self.server.broadcast(self._access())
+
+    def _folders(self) -> list[dict]:
+        """Somewhere to start from: the folders directly inside home.
+
+        QML on this desktop cannot read a directory and there is no file
+        dialog in the shell, so the choice has to be assembled here. Only one
+        level deep and only real directories — this is a starting point for a
+        person who mostly knows where their work lives, not a file manager.
+        """
+        home = Path.home()
+        out: list[dict] = []
+        try:
+            entries = sorted(home.iterdir(), key=lambda e: e.name.lower())
+        except OSError as exc:
+            log.warning("cannot list %s: %s", home, exc)
+            return out
+        for entry in entries:
+            if entry.name.startswith(".") or not entry.is_dir():
+                continue
+            out.append({"path": str(entry), "label": entry.name})
+            if len(out) >= 40:
+                break
+        return out
+
     # -- the event stream ----------------------------------------------------
 
     def _emit(self, kind: str, text: str = "", **extra) -> None:
@@ -202,8 +280,19 @@ class Daemon:
         This is a Linux desktop, not a black box: showing what was heard, what
         was asked of the agent and how long it took is more reassuring while
         you wait than a spinner is. One short line per event.
+
+        One line, and the length is enforced rather than assumed. Most of what
+        arrives here is a transcript from the far end — text this program did
+        not write and cannot vouch for — and a tail of these events is kept to
+        replay to a panel that opens late. Something held and re-sent should
+        not be able to decide its own size.
         """
-        payload = {"type": "event", "kind": kind, "text": text, "at": time.time()}
+        payload = {
+            "type": "event",
+            "kind": kind,
+            "text": text if len(text) <= _MAX_EVENT_TEXT else text[:_MAX_EVENT_TEXT].rstrip() + " …",
+            "at": time.time(),
+        }
         payload.update(extra)
         self.server.broadcast(payload)
 
@@ -950,9 +1039,57 @@ class Daemon:
             await self._broadcast_audio()
             return {"ok": True, "input": value}
 
+        if command == "access":
+            # Everything the consent screen needs in one round trip: what was
+            # chosen, what was allowed, and what this machine offers to choose
+            # from.
+            return {"ok": True, **self._access(), "folders": self._folders()}
+
+        if command == "workspace":
+            value = str(message.get("value") or "").strip()
+            if not value:
+                return {"ok": False, "error": "no folder given"}
+            folder = Path(value).expanduser()
+            if not folder.is_dir():
+                return {"ok": False, "error": f"{folder} is not a folder"}
+            folder = folder.resolve()
+            if folder != self.cfg.brain_cwd:
+                self.cfg.brain_cwd = folder
+                self._save_preferences()
+                # A conversation with the agent is anchored to the directory it
+                # started in — codex indexes its sessions by it and refuses
+                # --cd on resume, claude keeps its transcript per project. So a
+                # thread begun in the old folder cannot be continued in the new
+                # one; carrying it over would work for exactly one more turn
+                # and then fail, which is the hardest kind of bug to place.
+                self.brain.reset()
+                self._emit("workspace", str(folder))
+                self._broadcast_access()
+            return {"ok": True, "workspace": str(folder)}
+
+        if command == "consent":
+            name = str(message.get("backend") or "")
+            if name not in ("codex", "claude"):
+                return {"ok": False, "error": f"unknown agent: {name}"}
+            granted = bool(message.get("granted"))
+            if granted:
+                self.cfg.consented.add(name)
+            else:
+                self.cfg.consented.discard(name)
+            self._save_preferences()
+            # Withdrawing is not only about the next question. The thread this
+            # agent was holding is the record of the previous ones.
+            if not granted:
+                self.brain.reset()
+            self._emit("consent", f"{name} · {'allowed' if granted else 'not allowed'}")
+            self._broadcast_access()
+            return {"ok": True, **self._access()}
+
         if command == "status":
             return {
                 "ok": True,
+                "workspace": str(self.cfg.brain_cwd or ""),
+                "consented": sorted(self.cfg.consented),
                 "state": self.state,
                 "backend": self.brain.backend,
                 "voice": self.cfg.voice,
@@ -982,6 +1119,7 @@ class Daemon:
         self.server.broadcast({"type": "backend", "backend": self.brain.backend})
         self.server.broadcast({"type": "voice", "voice": self.cfg.voice})
         self.server.broadcast({"type": "key", "hasKey": bool(self.cfg.api_key)})
+        self._broadcast_access()
         # The catalogue lives in one place — here — so the panel never has a
         # stale copy of which voices exist or which gender each speaks in.
         self.server.broadcast(

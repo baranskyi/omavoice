@@ -404,9 +404,24 @@ draw a widget. Plainly, what it does:
 - **It records audio** while a session is open, and streams it to the OpenAI
   Realtime API. The microphone is released the moment the panel goes to the
   background or the session ends.
-- **It runs `codex` or `claude` as a subprocess**, in a **read-only** sandbox:
-  the agent reads and reports, it changes nothing. Speech is too easy to get
-  wrong, and transcription adds its own error on top.
+- **Nothing is asked of an agent until you have said so.** On first run the
+  panel asks two questions and refuses every request until both are answered:
+  which folder the assistant works in, and which agent — `codex`, `claude`, or
+  both, named separately — is allowed to answer at all. Both live in Settings ▸
+  Access afterwards, and either can be withdrawn. `omavoice-ctl access`,
+  `workspace`, `allow` and `revoke` do the same from a terminal.
+- **It runs `codex` or `claude` as a subprocess** in the folder you named, and
+  neither can write: codex under `--sandbox read-only`, claude under
+  `--permission-mode plan` with `Write`, `Edit`, `MultiEdit` and `NotebookEdit`
+  denied outright. Speech is too easy to get wrong, and transcription adds its
+  own error on top.
+- **The folder is where the agent works, not a wall around what it can read.**
+  Worth stating exactly, because the flags read as though it were: codex's
+  read-only sandbox bounds writing and not reading, and claude in plan mode
+  will read a path outside the folder as readily as one inside it. Both were
+  measured against a file placed outside, not assumed from the documentation.
+  The control that means something is therefore the permission itself — an
+  agent you have not allowed is never started, with any question.
 - **Requests that consist of a destructive command** (`rm -rf`, `mkfs`,
   `shutdown`) never reach the agent.
 - **The key** lives in `~/.config/omavoice/key`, mode `600`, in a file of its
@@ -418,6 +433,14 @@ draw a widget. Plainly, what it does:
   running as the same user can read it. An earlier version passed the key in
   through the environment and claimed it was visible only to the unit, which
   was not true.
+- **What the agent hands back is bounded before it is kept.** The daemon runs
+  for weeks and the agent it starts runs for a minute, so everything the short
+  process writes would otherwise be held in the long one and pushed to the
+  panel. Each pipe is read to a ceiling and the process is ended at it rather
+  than drained; the answer file is refused if it is oversized rather than read
+  in part; and every field that survives into an answer — spoken text,
+  markdown, the number of links and files and the length of each — is cut to
+  size before it is retained or broadcast.
 - **Links and paths from an answer** are opened through an argv vector with a
   scheme check: their source is a retelling of untrusted content.
 - **Images are stripped out of markdown** so the shell never fetches them.

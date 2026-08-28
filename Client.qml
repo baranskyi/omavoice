@@ -52,6 +52,20 @@ Item {
   property string audioResolved: ""
   property bool audioHeadphones: false
 
+  // --- what has been agreed to ----------------------------------------------
+  // The folder the agent works in, and which agents have been allowed to work
+  // at all. `accessNeeded` is the daemon's own answer to "would a question be
+  // refused right now" — asked once there rather than recomputed here, so the
+  // panel and the thing doing the refusing cannot disagree.
+  property string workspace: ""
+  property var consented: []
+  property bool accessNeeded: false
+  property var folderChoices: []
+
+  function backendAllowed(name) {
+    return root.consented.indexOf(String(name)) >= 0
+  }
+
   signal answered()
 
   // The waterfall. Newest first, because the interesting line is always the
@@ -127,6 +141,11 @@ Item {
   function setBackend(name) { return send({ cmd: "backend", value: String(name) }) }
   function setVoice(name) { return send({ cmd: "voice", value: String(name) }) }
   function setApiKey(key) { return send({ cmd: "apikey", value: String(key) }) }
+  function setWorkspace(path) { return send({ cmd: "workspace", value: String(path || "") }) }
+  function setConsent(name, granted) {
+    return send({ cmd: "consent", backend: String(name), granted: granted === true })
+  }
+  function askAccess() { return send({ cmd: "access", id: 7 }) }
 
   function clearConversation() {
     eventModel.clear()
@@ -175,6 +194,12 @@ Item {
       break
     case "voices":
       if (Array.isArray(message.voices)) root.voiceCatalogue = message.voices
+      break
+    case "access":
+      root.workspace = String(message.workspace || "")
+      root.consented = Array.isArray(message.consented) ? message.consented : []
+      root.accessNeeded = message.needed === true
+      if (Array.isArray(message.folders)) root.folderChoices = message.folders
       break
     case "audio":
       root.audioInput = String(message.input || "")

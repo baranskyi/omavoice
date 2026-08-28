@@ -30,12 +30,15 @@ Item {
   property string audioInput: ""
   property string audioResolved: ""
   property string keyError: ""
+  property string workspace: ""
+  property var consented: []
 
   signal closed()
   signal voicePicked(string name)
   signal backendPicked(string name)
   signal inputPicked(string name)
   signal keySubmitted(string key)
+  signal accessRequested()
 
   onOpenChanged: {
     if (open) {
@@ -99,350 +102,411 @@ Item {
           }
         }
 
-        Column {
-          id: body
-          anchors.top: parent.top
-          anchors.left: parent.left
-          anchors.right: parent.right
-          spacing: Style.spacing.panelGap
+        Flickable {
+          id: scroller
+          anchors.fill: parent
+          contentHeight: body.implicitHeight
+          clip: true
+          interactive: contentHeight > height
+          boundsBehavior: Flickable.StopAtBounds
 
-          Row {
-            width: parent.width
-            spacing: Style.spaceReal(8)
+          Column {
+            id: body
+            width: scroller.width
+            spacing: Style.spacing.panelGap
 
-            Item {
-              width: Style.spaceReal(18)
-              height: Style.spaceReal(18)
-              anchors.verticalCenter: parent.verticalCenter
-              PrimeRadiant { anchors.fill: parent; tint: Color.accent; voiceState: "listening" }
-            }
+            Row {
+              width: parent.width
+              spacing: Style.spaceReal(8)
 
-            Text {
-              anchors.verticalCenter: parent.verticalCenter
-              text: "Voice settings"
-              textFormat: Text.PlainText
-              color: Color.menu.text
-              font.family: Style.font.family
-              font.pixelSize: Style.font.title
-            }
-          }
+              Item {
+                width: Style.spaceReal(18)
+                height: Style.spaceReal(18)
+                anchors.verticalCenter: parent.verticalCenter
+                PrimeRadiant { anchors.fill: parent; tint: Color.accent; voiceState: "listening" }
+              }
 
-          PanelSeparator { width: parent.width }
-
-          // --- connection -------------------------------------------------
-          PanelSectionHeader { width: parent.width; text: "OpenAI API key" }
-
-          Text {
-            width: parent.width
-            text: root.hasKey
-              ? "A key is configured. Paste a new one to replace it."
-              : "The Realtime API needs a paid API key — a ChatGPT subscription does not work for it. The key is stored in ~/.config/omavoice/env with mode 600."
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: Color.menu.text
-            opacity: 0.55
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          // Where the key actually comes from. Obvious once you have done it
-          // once, and a dead end if you have not — most people have never seen
-          // the API platform, which is a different site from the ChatGPT they
-          // already pay for.
-          Row {
-            spacing: Style.spaceReal(5)
-
-            Text {
-              id: keyLink
-              text: "platform.openai.com/api-keys"
-              textFormat: Text.PlainText
-              color: Color.accent
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-              font.underline: linkHover.hovered
-            }
-
-            Text {
-              anchors.verticalCenter: keyLink.verticalCenter
-              text: "↗"
-              textFormat: Text.PlainText
-              color: Color.accent
-              opacity: 0.7
-              font.family: Style.font.family
-              font.pixelSize: Style.font.caption
-            }
-
-            HoverHandler {
-              id: linkHover
-              cursorShape: Qt.PointingHandCursor
-            }
-            // execArgv, not a shell string: the URL is a constant here, but
-            // this is the habit that keeps the one that is not from biting.
-            TapHandler {
-              onTapped: Util.execArgv(["xdg-open", "https://platform.openai.com/api-keys"])
-            }
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.spaceReal(8)
-
-            TextField {
-              id: keyField
-              width: parent.width - saveButton.width - parent.spacing
-              // Masked: this is pasted on a screen that may be shared, and it
-              // is never displayed again once saved.
-              password: true
-              placeholderText: "sk-..."
-              foreground: Color.menu.text
-              accent: Color.accent
-              onAccepted: root.keySubmitted(keyField.text)
-            }
-
-            Button {
-              id: saveButton
-              anchors.verticalCenter: parent.verticalCenter
-              text: "Save"
-              bordered: true
-              foreground: Color.menu.text
-              accent: Color.accent
-              fontFamily: Style.font.family
-              onClicked: root.keySubmitted(keyField.text)
-            }
-          }
-
-          Text {
-            width: parent.width
-            visible: root.keyError !== ""
-            text: root.keyError
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: Color.urgent
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          PanelSeparator { width: parent.width }
-
-          // --- voice --------------------------------------------------------
-          PanelSectionHeader { width: parent.width; text: "Voice" }
-
-          Text {
-            width: parent.width
-            visible: !root.hasKey
-            text: "Add a key first — voices are read from the connected account."
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: Color.menu.text
-            opacity: 0.45
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          Flow {
-            width: parent.width
-            visible: root.hasKey
-            spacing: Style.spaceReal(6)
-
-            Repeater {
-              model: root.voices
-
-              Rectangle {
-                id: chip
-                required property var modelData
-
-                readonly property bool selected: String(chip.modelData.name) === root.currentVoice
-                readonly property bool female: String(chip.modelData.gender) === "female"
-
-                implicitWidth: chipRow.implicitWidth + Style.spaceReal(16)
-                implicitHeight: chipRow.implicitHeight + Style.spaceReal(9)
-                radius: Style.spaceReal(5)
-
-                color: chip.selected
-                  ? Style.selectedFillFor(Color.menu.text, Color.accent)
-                  : (hover.hovered ? Style.hoverFillFor(Color.menu.text, Color.accent) : "transparent")
-                border.width: 1
-                border.color: chip.selected
-                  ? Color.accent
-                  : Qt.rgba(Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.18)
-
-                Behavior on color { ColorAnimation { duration: 140 } }
-
-                Row {
-                  id: chipRow
-                  anchors.centerIn: parent
-                  spacing: Style.spaceReal(5)
-
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: String(chip.modelData.name)
-                    textFormat: Text.PlainText
-                    color: chip.selected ? Color.accent : Color.menu.text
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                  }
-
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    text: chip.female ? "♀" : "♂"
-                    textFormat: Text.PlainText
-                    color: chip.selected ? Color.accent : Color.menu.text
-                    opacity: 0.5
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                  }
-                }
-
-                HoverHandler { id: hover }
-                TapHandler { onTapped: root.voicePicked(String(chip.modelData.name)) }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Voice settings"
+                textFormat: Text.PlainText
+                color: Color.menu.text
+                font.family: Style.font.family
+                font.pixelSize: Style.font.title
               }
             }
-          }
 
-          Text {
-            width: parent.width
-            visible: root.hasKey
-            // Worth stating: in Russian, Hebrew, Spanish and others the
-            // assistant's own verbs change with this choice.
-            text: "Changing the voice reconnects the session. In languages that mark gender, the assistant speaks about itself to match."
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: Color.menu.text
-            opacity: 0.4
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
+            PanelSeparator { width: parent.width }
 
-          PanelSeparator { width: parent.width }
+            // --- connection -------------------------------------------------
+            PanelSectionHeader { width: parent.width; text: "OpenAI API key" }
 
-          // --- agent --------------------------------------------------------
-          // --- microphone ---------------------------------------------------
-          PanelSectionHeader { width: parent.width; text: "Microphone" }
+            Text {
+              width: parent.width
+              text: root.hasKey
+                ? "A key is configured. Paste a new one to replace it."
+                : "The Realtime API needs a paid API key — a ChatGPT subscription does not work for it. The key is stored in ~/.config/omavoice/env with mode 600."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              opacity: 0.55
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
 
-          Text {
-            width: parent.width
-            // The one line that used to live only in the log, and whose absence
-            // made a changed desk look like a broken assistant.
-            text: root.audioResolved !== ""
-              ? root.audioResolved
-              : "Chosen when a conversation starts."
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: Color.menu.text
-            opacity: 0.45
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
+            // Where the key actually comes from. Obvious once you have done it
+            // once, and a dead end if you have not — most people have never seen
+            // the API platform, which is a different site from the ChatGPT they
+            // already pay for.
+            Row {
+              spacing: Style.spaceReal(5)
 
-          Flow {
-            id: micFlow
-            width: parent.width
-            spacing: Style.spaceReal(6)
+              Text {
+                id: keyLink
+                text: "platform.openai.com/api-keys"
+                textFormat: Text.PlainText
+                color: Color.accent
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                font.underline: linkHover.hovered
+              }
 
-            Repeater {
-              model: [{ name: "", label: "Follow the system" }].concat(root.audioSources)
+              Text {
+                anchors.verticalCenter: keyLink.verticalCenter
+                text: "↗"
+                textFormat: Text.PlainText
+                color: Color.accent
+                opacity: 0.7
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
 
-              Rectangle {
-                id: mic
-                required property var modelData
+              HoverHandler {
+                id: linkHover
+                cursorShape: Qt.PointingHandCursor
+              }
+              // execArgv, not a shell string: the URL is a constant here, but
+              // this is the habit that keeps the one that is not from biting.
+              TapHandler {
+                onTapped: Util.execArgv(["xdg-open", "https://platform.openai.com/api-keys"])
+              }
+            }
 
-                readonly property bool selected: String(mic.modelData.name) === root.audioInput
-                readonly property bool auto: String(mic.modelData.name) === ""
+            Row {
+              width: parent.width
+              spacing: Style.spaceReal(8)
 
-                // Measured from the row, never from the chip: sizing the label
-                // against its own chip closes a binding loop, and QML answers a
-                // loop by leaving every width at zero — which stacks the whole
-                // list in one spot.
-                readonly property real maxLabel: micFlow.width - Style.spaceReal(24)
+              TextField {
+                id: keyField
+                width: parent.width - saveButton.width - parent.spacing
+                // Masked: this is pasted on a screen that may be shared, and it
+                // is never displayed again once saved.
+                password: true
+                placeholderText: "sk-..."
+                foreground: Color.menu.text
+                accent: Color.accent
+                onAccepted: root.keySubmitted(keyField.text)
+              }
 
-                implicitWidth: micLabel.width + Style.spaceReal(16)
-                implicitHeight: micLabel.implicitHeight + Style.spaceReal(9)
-                radius: Style.spaceReal(5)
+              Button {
+                id: saveButton
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Save"
+                bordered: true
+                foreground: Color.menu.text
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: root.keySubmitted(keyField.text)
+              }
+            }
 
-                color: mic.selected
-                  ? Style.selectedFillFor(Color.menu.text, Color.accent)
-                  : (micHover.hovered ? Style.hoverFillFor(Color.menu.text, Color.accent) : "transparent")
-                border.width: 1
-                border.color: mic.selected
-                  ? Color.accent
-                  : Qt.rgba(Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.18)
+            Text {
+              width: parent.width
+              visible: root.keyError !== ""
+              text: root.keyError
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.urgent
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
 
-                Behavior on color { ColorAnimation { duration: 140 } }
+            PanelSeparator { width: parent.width }
+
+            // --- voice --------------------------------------------------------
+            PanelSectionHeader { width: parent.width; text: "Voice" }
+
+            Text {
+              width: parent.width
+              visible: !root.hasKey
+              text: "Add a key first — voices are read from the connected account."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              opacity: 0.45
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Flow {
+              width: parent.width
+              visible: root.hasKey
+              spacing: Style.spaceReal(6)
+
+              Repeater {
+                model: root.voices
+
+                Rectangle {
+                  id: chip
+                  required property var modelData
+
+                  readonly property bool selected: String(chip.modelData.name) === root.currentVoice
+                  readonly property bool female: String(chip.modelData.gender) === "female"
+
+                  implicitWidth: chipRow.implicitWidth + Style.spaceReal(16)
+                  implicitHeight: chipRow.implicitHeight + Style.spaceReal(9)
+                  radius: Style.spaceReal(5)
+
+                  color: chip.selected
+                    ? Style.selectedFillFor(Color.menu.text, Color.accent)
+                    : (hover.hovered ? Style.hoverFillFor(Color.menu.text, Color.accent) : "transparent")
+                  border.width: 1
+                  border.color: chip.selected
+                    ? Color.accent
+                    : Qt.rgba(Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.18)
+
+                  Behavior on color { ColorAnimation { duration: 140 } }
+
+                  Row {
+                    id: chipRow
+                    anchors.centerIn: parent
+                    spacing: Style.spaceReal(5)
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: String(chip.modelData.name)
+                      textFormat: Text.PlainText
+                      color: chip.selected ? Color.accent : Color.menu.text
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+
+                    Text {
+                      anchors.verticalCenter: parent.verticalCenter
+                      text: chip.female ? "♀" : "♂"
+                      textFormat: Text.PlainText
+                      color: chip.selected ? Color.accent : Color.menu.text
+                      opacity: 0.5
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
+                  }
+
+                  HoverHandler { id: hover }
+                  TapHandler { onTapped: root.voicePicked(String(chip.modelData.name)) }
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              visible: root.hasKey
+              // Worth stating: in Russian, Hebrew, Spanish and others the
+              // assistant's own verbs change with this choice.
+              text: "Changing the voice reconnects the session. In languages that mark gender, the assistant speaks about itself to match."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              opacity: 0.4
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            PanelSeparator { width: parent.width }
+
+            // --- agent --------------------------------------------------------
+            // --- microphone ---------------------------------------------------
+            PanelSectionHeader { width: parent.width; text: "Microphone" }
+
+            Text {
+              width: parent.width
+              // The one line that used to live only in the log, and whose absence
+              // made a changed desk look like a broken assistant.
+              text: root.audioResolved !== ""
+                ? root.audioResolved
+                : "Chosen when a conversation starts."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              opacity: 0.45
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Flow {
+              id: micFlow
+              width: parent.width
+              spacing: Style.spaceReal(6)
+
+              Repeater {
+                model: [{ name: "", label: "Follow the system" }].concat(root.audioSources)
+
+                Rectangle {
+                  id: mic
+                  required property var modelData
+
+                  readonly property bool selected: String(mic.modelData.name) === root.audioInput
+                  readonly property bool auto: String(mic.modelData.name) === ""
+
+                  // Measured from the row, never from the chip: sizing the label
+                  // against its own chip closes a binding loop, and QML answers a
+                  // loop by leaving every width at zero — which stacks the whole
+                  // list in one spot.
+                  readonly property real maxLabel: micFlow.width - Style.spaceReal(24)
+
+                  implicitWidth: micLabel.width + Style.spaceReal(16)
+                  implicitHeight: micLabel.implicitHeight + Style.spaceReal(9)
+                  radius: Style.spaceReal(5)
+
+                  color: mic.selected
+                    ? Style.selectedFillFor(Color.menu.text, Color.accent)
+                    : (micHover.hovered ? Style.hoverFillFor(Color.menu.text, Color.accent) : "transparent")
+                  border.width: 1
+                  border.color: mic.selected
+                    ? Color.accent
+                    : Qt.rgba(Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.18)
+
+                  Behavior on color { ColorAnimation { duration: 140 } }
+
+                  Text {
+                    id: micLabel
+                    anchors.centerIn: parent
+                    width: Math.min(implicitWidth, mic.maxLabel)
+                    elide: Text.ElideRight
+                    horizontalAlignment: Text.AlignHCenter
+                    text: String(mic.modelData.label || mic.modelData.name)
+                    textFormat: Text.PlainText
+                    color: mic.selected ? Color.accent : Color.menu.text
+                    opacity: mic.selected ? 1 : (mic.auto ? 0.8 : 0.65)
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                  }
+
+                  HoverHandler { id: micHover }
+                  TapHandler { onTapped: root.inputPicked(String(mic.modelData.name)) }
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              // Said plainly, because it is the single most useful thing anyone
+              // can do about recognition on this machine.
+              text: "Following the system picks a headset when one is worn, and routes "
+                  + "through the echo canceller when the room is in play. A microphone "
+                  + "close to the mouth is worth more than any setting here."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              opacity: 0.35
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            PanelSectionHeader { width: parent.width; text: "Local agent" }
+
+            Row {
+              width: parent.width
+              spacing: Style.spaceReal(8)
+
+              Repeater {
+                model: ["codex", "claude"]
+
+                AgentBadge {
+                  id: badge
+                  required property string modelData
+                  agent: badge.modelData
+                  opacity: badge.modelData === root.backend ? 1 : 0.35
+                  Behavior on opacity { NumberAnimation { duration: 160 } }
+                  TapHandler { onTapped: root.backendPicked(badge.modelData) }
+                }
+              }
+            }
+
+            Text {
+              width: parent.width
+              // "Read-only" used to stand here for both. It is true about
+              // writing and was being read as a claim about reading, which is a
+              // different and much larger promise — codex's sandbox does not
+              // make it, as an afternoon with the actual binary established.
+              text: "codex runs on the ChatGPT subscription; claude brings its skills "
+                  + "and MCP connectors. Neither can change your files."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              opacity: 0.4
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            PanelSeparator { width: parent.width }
+
+            // --- access -------------------------------------------------------
+            PanelSectionHeader { width: parent.width; text: "Access" }
+
+            Row {
+              width: parent.width
+              spacing: Style.spaceReal(8)
+
+              Column {
+                width: parent.width - accessButton.width - parent.spacing
+                spacing: Style.spaceReal(3)
 
                 Text {
-                  id: micLabel
-                  anchors.centerIn: parent
-                  width: Math.min(implicitWidth, mic.maxLabel)
-                  elide: Text.ElideRight
-                  horizontalAlignment: Text.AlignHCenter
-                  text: String(mic.modelData.label || mic.modelData.name)
+                  width: parent.width
+                  text: root.workspace === "" ? "No folder chosen" : root.workspace
                   textFormat: Text.PlainText
-                  color: mic.selected ? Color.accent : Color.menu.text
-                  opacity: mic.selected ? 1 : (mic.auto ? 0.8 : 0.65)
+                  elide: Text.ElideMiddle
+                  color: root.workspace === "" ? Color.urgent : Color.menu.text
                   font.family: Style.font.family
                   font.pixelSize: Style.font.body
                 }
 
-                HoverHandler { id: micHover }
-                TapHandler { onTapped: root.inputPicked(String(mic.modelData.name)) }
+                Text {
+                  width: parent.width
+                  text: root.consented.length === 0
+                    ? "No agent is allowed to answer yet"
+                    : "Allowed: " + root.consented.join(", ")
+                  textFormat: Text.PlainText
+                  wrapMode: Text.Wrap
+                  color: Color.menu.text
+                  opacity: 0.4
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                }
+              }
+
+              Button {
+                id: accessButton
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Change"
+                bordered: true
+                foreground: Color.menu.text
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: root.accessRequested()
               }
             }
-          }
 
-          Text {
-            width: parent.width
-            // Said plainly, because it is the single most useful thing anyone
-            // can do about recognition on this machine.
-            text: "Following the system picks a headset when one is worn, and routes "
-                + "through the echo canceller when the room is in play. A microphone "
-                + "close to the mouth is worth more than any setting here."
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: Color.menu.text
-            opacity: 0.35
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          PanelSectionHeader { width: parent.width; text: "Local agent" }
-
-          Row {
-            width: parent.width
-            spacing: Style.spaceReal(8)
-
-            Repeater {
-              model: ["codex", "claude"]
-
-              AgentBadge {
-                id: badge
-                required property string modelData
-                agent: badge.modelData
-                opacity: badge.modelData === root.backend ? 1 : 0.35
-                Behavior on opacity { NumberAnimation { duration: 160 } }
-                TapHandler { onTapped: root.backendPicked(badge.modelData) }
-              }
+            Text {
+              width: parent.width
+              text: "Esc — close"
+              textFormat: Text.PlainText
+              color: Color.menu.text
+              opacity: 0.3
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
             }
-          }
-
-          Text {
-            width: parent.width
-            text: "codex runs on the ChatGPT subscription; claude brings its skills and MCP connectors. Both answer read-only."
-            textFormat: Text.PlainText
-            wrapMode: Text.Wrap
-            color: Color.menu.text
-            opacity: 0.4
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
-          }
-
-          Text {
-            width: parent.width
-            text: "Esc — close"
-            textFormat: Text.PlainText
-            color: Color.menu.text
-            opacity: 0.3
-            font.family: Style.font.family
-            font.pixelSize: Style.font.caption
           }
         }
       }

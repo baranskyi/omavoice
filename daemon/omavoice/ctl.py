@@ -83,6 +83,17 @@ def main() -> int:
     voice = sub.add_parser("voice", help="pick the voice (and with it, the grammatical gender)")
     voice.add_argument("name", nargs="?", help="omit to list what is available")
 
+    sub.add_parser("access", help="the folder in use and which agents are allowed")
+
+    workspace = sub.add_parser("workspace", help="the folder the agent works in")
+    workspace.add_argument("folder", help="an existing directory")
+
+    allow = sub.add_parser("allow", help="let an agent answer by voice")
+    allow.add_argument("name", choices=("codex", "claude"))
+
+    revoke = sub.add_parser("revoke", help="withdraw an agent's permission")
+    revoke.add_argument("name", choices=("codex", "claude"))
+
     args = parser.parse_args()
 
     if args.command == "ask":
@@ -91,6 +102,12 @@ def main() -> int:
         return asyncio.run(_send({"cmd": "backend", "value": args.name}))
     if args.command == "say":
         return asyncio.run(_send({"cmd": "say", "text": " ".join(args.text)}))
+    if args.command == "workspace":
+        return asyncio.run(_send({"cmd": "workspace", "value": args.folder}))
+    if args.command == "allow":
+        return asyncio.run(_send({"cmd": "consent", "backend": args.name, "granted": True}))
+    if args.command == "revoke":
+        return asyncio.run(_send({"cmd": "consent", "backend": args.name, "granted": False}))
     if args.command == "voice":
         if not args.name:
             from .config import VOICES

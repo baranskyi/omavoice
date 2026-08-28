@@ -46,6 +46,49 @@ _DESTRUCTIVE = re.compile(
 _REFUSAL = ("I do not run commands by voice — I only read and report. "
             "Do that one yourself in a terminal.")
 
+# How much a backend is allowed to say before we stop listening to it.
+#
+# This daemon runs for weeks; the agent it starts runs for a minute. That
+# asymmetry is the whole problem: everything the short-lived process writes is
+# held in the long-lived one, and then handed to the panel over the socket. A
+# backend stuck in a retry loop, or one that decided the answer to a question
+# was the contents of a log file, would otherwise choose how much memory the
+# service uses and how much the panel is asked to draw.
+#
+# The numbers are set against what real work looks like. An answer is a few
+# hundred bytes; codex's --json event stream is the only legitimately bulky
+# thing here, and a full minute of it — the brain timeout — measures in tens of
+# kilobytes. Four megabytes is not a long answer. It is a fault.
+_MAX_STDOUT = 4 * 1024 * 1024
+_MAX_STDERR = 256 * 1024
+_MAX_ANSWER_FILE = 1024 * 1024
+_MAX_SCHEMA_FILE = 64 * 1024
+
+# And what survives into an Answer, which is what gets retained and broadcast.
+_MAX_SPOKEN = 4000
+_MAX_MARKDOWN = 64 * 1024
+_MAX_ENTRIES = 24
+_MAX_LABEL = 200
+_MAX_VALUE = 2048
+# Thread and session ids come back from the backend and go out again as
+# command-line arguments on the next question, which is reason enough.
+_MAX_THREAD_ID = 200
+
+_CHUNK = 64 * 1024
+
+
+def _clip(text: str, limit: int) -> str:
+    """Cut a field to size.
+
+    Silent on purpose. One oversized answer touches every field of every
+    entry, and a warning apiece would put fifty lines in the journal — a
+    fault that floods the log is the same fault we are bounding here, in a
+    quieter place. `_coerce` says it once, for the answer as a whole.
+    """
+    if len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + " …"
+
 
 @dataclass
 class Answer:
@@ -91,24 +134,39 @@ def _coerce(raw: str) -> Answer:
     try:
         data = json.loads(text)
     except json.JSONDecodeError:
-        return Answer(spoken=raw.strip(), markdown="")
+        return Answer(spoken=_clip(raw.strip(), _MAX_SPOKEN), markdown="")
 
     if not isinstance(data, dict):
-        return Answer(spoken=str(data))
+        return Answer(spoken=_clip(str(data), _MAX_SPOKEN))
 
     def _entries(key: str, second: str) -> list[dict]:
+        raw_list = data.get(key)
+        if not isinstance(raw_list, list):
+            return []
         out = []
-        for item in data.get(key) or []:
+        # Both how many and how long. A list is a row of buttons in the
+        # panel, and two dozen is already more than anyone reads; a label is
+        # a few words and a path is a path.
+        for item in raw_list[:_MAX_ENTRIES]:
             if isinstance(item, dict) and item.get("label") and item.get(second):
-                out.append({"label": str(item["label"]), second: str(item[second])})
+                out.append(
+                    {
+                        "label": _clip(str(item["label"]), _MAX_LABEL),
+                        second: _clip(str(item[second]), _MAX_VALUE),
+                    }
+                )
         return out
 
-    spoken = str(data.get("spoken") or "").strip()
-    markdown = str(data.get("markdown") or "").strip()
+    spoken = _clip(str(data.get("spoken") or "").strip(), _MAX_SPOKEN)
+    markdown = _clip(str(data.get("markdown") or "").strip(), _MAX_MARKDOWN)
     if not spoken:
         # A backend that filled only the panel still owes the voice something.
-        spoken = re.sub(r"[#*`>\-]", " ", markdown).strip() or "Done."
-    return Answer(spoken=spoken, markdown=markdown, links=_entries("links", "url"), files=_entries("files", "path"))
+        spoken = _clip(re.sub(r"[#*`>\-]", " ", markdown).strip() or "Done.", _MAX_SPOKEN)
+    links = _entries("links", "url")
+    files = _entries("files", "path")
+    if len(text) > _MAX_MARKDOWN + _MAX_SPOKEN:
+        log.warning("the agent returned %d bytes of answer — trimmed to fit", len(text))
+    return Answer(spoken=spoken, markdown=markdown, links=links, files=files)
 
 
 async def _reap(proc: asyncio.subprocess.Process) -> None:
@@ -139,6 +197,30 @@ async def _reap(proc: asyncio.subprocess.Process) -> None:
         await asyncio.wait_for(proc.wait(), timeout=2)
 
 
+def _read_capped(path: Path, limit: int, what: str) -> str:
+    """Read a file the agent wrote, refusing to read more than `limit`.
+
+    Asking how big it is and then reading it are two facts about two
+    different moments, and the agent is still running between them. So the
+    ceiling is carried by the read itself: one byte past the limit is enough
+    to know the file is wrong without holding the rest of it.
+
+    Oversized is refused rather than trimmed. A truncated JSON document is
+    not a smaller answer, it is a broken one, and `_coerce` would fall back
+    to speaking the fragment aloud.
+    """
+    try:
+        with path.open("rb") as handle:
+            data = handle.read(limit + 1)
+    except OSError as exc:
+        log.warning("cannot read %s: %s", what, exc)
+        return ""
+    if len(data) > limit:
+        log.warning("%s is over %d bytes — ignoring it", what, limit)
+        return ""
+    return data.decode(errors="replace")
+
+
 class Brain:
     def __init__(self, cfg: Config) -> None:
         self.cfg = cfg
@@ -163,6 +245,22 @@ class Brain:
         """Forget conversation history. A new panel session starts clean."""
         self._threads.clear()
 
+    def denial(self) -> str:
+        """Why this backend may not be asked anything, or "" if it may.
+
+        Both halves are the person's to decide and neither has a sensible
+        default, so both are checked in one place — here — rather than being
+        assumed anywhere that wants to ask a question. A backend that has not
+        been permitted is not asked a smaller question; it is not asked.
+        """
+        if self.cfg.brain_cwd is None:
+            return ("No folder has been chosen for me to work in yet. "
+                    "Open the panel and pick one.")
+        if self.backend not in self.cfg.consented:
+            return (f"{self.backend} has not been allowed to answer by voice yet. "
+                    "Open the panel and say yes.")
+        return ""
+
     async def cancel(self) -> None:
         proc = self._proc
         if proc is not None:
@@ -185,6 +283,11 @@ class Brain:
         if not shutil.which(self.backend):
             return Answer.error(f"The {self.backend} agent is not installed.")
 
+        denial = self.denial()
+        if denial:
+            log.info("not asking %s: %s", self.backend, denial)
+            return Answer.error(denial)
+
         try:
             if self.backend == "codex":
                 return await self._ask_codex(query)
@@ -198,6 +301,50 @@ class Brain:
 
     # -- backends -----------------------------------------------------------
 
+    async def _drain(
+        self, proc: asyncio.subprocess.Process, stream: asyncio.StreamReader, limit: int, what: str
+    ) -> bytes:
+        """Read one pipe up to `limit` bytes, then end the process writing it.
+
+        Reading in bounded chunks keeps our own memory in hand, but on its own
+        it only moves the problem: a backend that keeps writing into a pipe
+        nobody drains simply blocks, and the answer never comes. The limit is
+        therefore a verdict, not a buffer size — past it the process is not
+        producing an answer, and the way to stop paying for it is to end it.
+        """
+        buf = bytearray()
+        while len(buf) < limit:
+            block = await stream.read(min(_CHUNK, limit - len(buf)))
+            if not block:
+                return bytes(buf)
+            buf += block
+        log.warning("agent wrote more than %d bytes to %s — stopping it", limit, what)
+        await _reap(proc)
+        return bytes(buf)
+
+    async def _gather(
+        self, proc: asyncio.subprocess.Process, stdin: bytes | None
+    ) -> tuple[bytes, bytes]:
+        """What `communicate()` does, with a ceiling on each pipe.
+
+        Both pipes have to be read at once — a child that fills stderr while we
+        are reading stdout deadlocks otherwise — and whichever one trips its
+        limit ends the process, which gives the other one its EOF.
+        """
+        if proc.stdin is not None:
+            with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
+                if stdin:
+                    proc.stdin.write(stdin)
+                    await proc.stdin.drain()
+                proc.stdin.close()
+        assert proc.stdout is not None and proc.stderr is not None
+        out, err = await asyncio.gather(
+            self._drain(proc, proc.stdout, _MAX_STDOUT, "stdout"),
+            self._drain(proc, proc.stderr, _MAX_STDERR, "stderr"),
+        )
+        await proc.wait()
+        return out, err
+
     async def _run(self, argv: list[str], stdin: bytes | None = None) -> tuple[int, str, str]:
         log.debug("running %s", " ".join(argv[:6]))
         proc = await asyncio.create_subprocess_exec(
@@ -205,10 +352,15 @@ class Brain:
             stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            # Where the agent starts, which for claude is also what it takes as
+            # its project. The daemon is started by systemd and inherits a
+            # working directory nobody chose; leaving that in place would make
+            # the scope an accident of how the service happened to be launched.
+            cwd=str(self.cfg.brain_cwd) if self.cfg.brain_cwd else None,
         )
         self._proc = proc
         try:
-            out, err = await asyncio.wait_for(proc.communicate(stdin), timeout=self.cfg.brain_timeout)
+            out, err = await asyncio.wait_for(self._gather(proc, stdin), timeout=self.cfg.brain_timeout)
         except (asyncio.TimeoutError, asyncio.CancelledError):
             # Both paths used to leave the agent running. `communicate()` being
             # cancelled does not touch the child, and the old `finally` dropped
@@ -239,6 +391,12 @@ class Brain:
             # question, none ≈ 12 s (it compensates with more tool calls), and
             # minimal is rejected by the model outright.
             "-c", "model_reasoning_effort=low",
+            # Writes, not reads. Worth being exact, because the name suggests
+            # otherwise and we have said otherwise in our own documentation:
+            # under this sandbox codex refuses to create a file outside the
+            # workspace and still reads one without complaint — measured, not
+            # assumed. Reading is bounded by the consent screen and by --cd
+            # below, not by this flag.
             "--sandbox", "read-only",
             "--cd", str(self.cfg.brain_cwd),
         ]
@@ -266,11 +424,13 @@ class Brain:
             except json.JSONDecodeError:
                 continue
             if event.get("thread_id"):
-                self._threads["codex"] = str(event["thread_id"])
+                self._threads["codex"] = _clip(str(event["thread_id"]), _MAX_THREAD_ID)
                 break
 
         if out_file.exists():
-            return _coerce(out_file.read_text())
+            answer = _read_capped(out_file, _MAX_ANSWER_FILE, "codex-last.json")
+            if answer:
+                return _coerce(answer)
 
         # No last-message file: fall back to the event stream, then give up.
         for line in reversed(stdout.splitlines()):
@@ -288,7 +448,9 @@ class Brain:
     async def _ask_claude(self, query: str) -> Answer:
         # claude has no --output-schema, so the shape goes in the prompt and
         # _coerce cleans up whatever comes back.
-        schema = ANSWER_SCHEMA.read_text()
+        schema = _read_capped(ANSWER_SCHEMA, _MAX_SCHEMA_FILE, "the answer schema")
+        if not schema:
+            return Answer.error("The answer schema is missing.")
         prompt = (
             "Answer the user's question using your access to this machine and the web.\n"
             "Reply with EXACTLY one JSON object matching this schema — no markdown "
@@ -298,7 +460,32 @@ class Brain:
             f"Question: {query}"
         )
 
-        argv = ["claude", "-p", "--output-format", "json", "--permission-mode", "plan"]
+        # Plan mode is what keeps claude reading rather than editing, and its
+        # file tools are held to the working directory — a path outside it
+        # comes back as a request for permission, which in a non-interactive
+        # run is nobody's to grant. The explicit denials are belt and braces:
+        # plan mode phrases its refusal as a question, and a question with no
+        # one to answer it is a weaker thing to rely on than a refusal.
+        #
+        # Note what is *not* denied. The connectors, the MCP servers and the
+        # shell are all left alone, because that is exactly what the consent
+        # screen asked about and exactly what was granted. A permission that
+        # quietly withholds half of what it promised is worse than no
+        # permission: the person stops being able to predict what they agreed
+        # to.
+        #
+        # Order matters here for a reason that has nothing to do with meaning:
+        # --disallowedTools is variadic, so it keeps eating arguments until it
+        # meets another flag. Left at the end it swallowed the question itself,
+        # and claude refused the run for having no prompt in it — which reaches
+        # the person as "the agent is broken". So it is followed by an ordinary
+        # flag, deliberately, and the question stays a positional argument.
+        argv = [
+            "claude", "-p",
+            "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit",
+            "--output-format", "json",
+            "--permission-mode", "plan",
+        ]
         thread = self._threads.get("claude")
         if thread:
             argv += ["--resume", thread]
@@ -317,7 +504,7 @@ class Brain:
 
         if isinstance(envelope, dict):
             if envelope.get("session_id"):
-                self._threads["claude"] = str(envelope["session_id"])
+                self._threads["claude"] = _clip(str(envelope["session_id"]), _MAX_THREAD_ID)
             return _coerce(str(envelope.get("result") or stdout))
         return _coerce(stdout)
 

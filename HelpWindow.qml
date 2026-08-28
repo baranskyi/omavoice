@@ -23,6 +23,7 @@ Item {
 
   property bool open: false
   property string backend: "codex"
+  property string workspace: ""
 
   signal closed()
 
@@ -335,12 +336,17 @@ Item {
                   + "it from answering questions of fact.\n\n"
                   + "Everything with substance goes to the agent already "
                   + "installed on this machine: codex or claude, whichever is "
-                  + "selected. It reads and reports; it changes nothing.\n\n"
+                  + "selected. It reads and reports; neither one can write, "
+                  + "edit or delete anything.\n\n"
                   + "That means whatever the agent can already reach, this can "
                   + "use — your files and projects, and the connectors set up "
                   + "for it: mail, calendar, MCP servers, the rest. Nothing "
                   + "was configured twice. Asking out loud reaches the same "
-                  + "assistant you have been typing to."
+                  + "assistant you have been typing to.\n\n"
+                  + "Which is also why it asks first. An agent is only ever "
+                  + "started after you have named a folder for it to work in "
+                  + "and allowed that particular agent by name — separately for "
+                  + "codex and for claude, once, in Settings under Access."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text
@@ -369,7 +375,9 @@ Item {
               Link { label: "ask_agent" }
               Node {
                 title: root.backend
-                detail: "the agent on this machine · read-only"
+                detail: root.workspace === ""
+                  ? "the agent on this machine · never writes"
+                  : "in " + root.workspace.split("/").pop() + " · never writes"
                 mark: Color.accent
               }
               Link { label: "reads" }

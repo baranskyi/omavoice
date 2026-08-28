@@ -30,6 +30,7 @@ Item {
 
   property bool settingsOpen: false
   property bool helpOpen: false
+  property bool consentOpen: false
   property string keyError: ""
 
   readonly property string pluginId: manifest && manifest.id ? String(manifest.id) : "io.github.baranskyi.omavoice"
@@ -148,15 +149,36 @@ Item {
     function toggle(): void { root.toggle() }
     function settings(): void { root.settingsOpen = !root.settingsOpen }
     function help(): void { root.helpOpen = !root.helpOpen }
+    function access(): void { root.consentOpen = !root.consentOpen }
     function reset(): void { client.reset() }
     function state(): string { return client.voiceState }
     function backend(): string { return client.backend }
+  }
+
+  ConsentWindow {
+    id: consentWindow
+    // Raised by itself the first time, and whenever what was agreed is no
+    // longer enough — a folder that has been deleted, a permission withdrawn.
+    // Not gated on `root.opened` the way the other two windows are: this one
+    // is the reason nothing is happening, and hiding it with the panel would
+    // leave the assistant silently refusing every question with the
+    // explanation one layer out of reach.
+    open: root.consentOpen || (client.accessNeeded && root.opened)
+    workspace: client.workspace
+    consented: client.consented
+    folders: client.folderChoices
+    backend: client.backend
+    onClosed: root.consentOpen = false
+    onRefreshed: client.askAccess()
+    onFolderPicked: function (path) { client.setWorkspace(path) }
+    onConsentChanged: function (agent, granted) { client.setConsent(agent, granted) }
   }
 
   HelpWindow {
     id: helpWindow
     open: root.helpOpen && root.opened
     backend: client.backend
+    workspace: client.workspace
     onClosed: root.helpOpen = false
   }
 
@@ -171,7 +193,13 @@ Item {
     audioInput: client.audioInput
     audioResolved: client.audioResolved
     keyError: root.keyError
+    workspace: client.workspace
+    consented: client.consented
     onClosed: root.settingsOpen = false
+    onAccessRequested: {
+      root.settingsOpen = false
+      root.consentOpen = true
+    }
     onVoicePicked: function (name) { client.setVoice(name) }
     onBackendPicked: function (name) { client.setBackend(name) }
     onInputPicked: function (name) { client.setInput(name) }

@@ -50,6 +50,20 @@ def _state_dir() -> Path:
     return Path(base) / "omavoice"
 
 
+def _env_path(name: str) -> Path | None:
+    """A directory named in the environment, if it is really there.
+
+    A workspace that does not exist is worse than none: the agent would start
+    in whatever the daemon's own working directory happens to be, which is the
+    unbounded case this setting exists to prevent.
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    path = Path(raw).expanduser()
+    return path if path.is_dir() else None
+
+
 def _env_flag(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None:
@@ -125,7 +139,28 @@ class Config:
     # --- brain -------------------------------------------------------------
     backend: str = field(default_factory=lambda: os.environ.get("OMAVOICE_BACKEND", "codex"))
     brain_timeout: float = 60.0
-    brain_cwd: Path = field(default_factory=Path.home)
+    # The folder this assistant works in — and, deliberately, the only one.
+    #
+    # It used to be the home directory, which was the wrong default in a way
+    # that is easy to miss: the agent is the same one you type to, so it can
+    # read whatever you can, and reaching it by voice makes a sentence spoken
+    # near the machine enough to start that. A room can be overheard; a
+    # transcription can be wrong. Naming a folder does not make either of those
+    # go away, but it decides in advance how far a mistake can reach.
+    #
+    # None means nobody has chosen yet, and the agent is not asked anything at
+    # all until they have. Not a default, because there is no folder this
+    # program can pick that would be right — the person is the only one who
+    # knows which of theirs is the safe one.
+    brain_cwd: Path | None = field(default_factory=lambda: _env_path("OMAVOICE_WORKSPACE"))
+    # Which backends have been told, in as many words, that they may use
+    # everything they can already do — their tools, their MCP servers, their
+    # connectors — on behalf of a voice. Empty means nobody has said so yet.
+    #
+    # Per-backend rather than one switch, because they are not the same
+    # program and do not reach the same things: granting codex says nothing
+    # about what claude has been connected to.
+    consented: set[str] = field(default_factory=set)
 
     # --- plumbing ----------------------------------------------------------
     socket_path: Path = field(default_factory=lambda: _runtime_dir() / "omavoice.sock")

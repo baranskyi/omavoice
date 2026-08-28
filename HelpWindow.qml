@@ -298,6 +298,20 @@ Item {
 
             Text {
               width: parent.width
+              text: "Q is also on the crystal in the bar: right-click it to stop "
+                  + "listening without opening the panel first. The glow is what "
+                  + "tells you the microphone is open, so the way to close it is "
+                  + "on the same mark."
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              color: Color.menu.text
+              opacity: 0.55
+              font.family: Style.font.family
+              font.pixelSize: Style.font.caption
+            }
+
+            Text {
+              width: parent.width
               text: "All of them are plain letters, because the panel takes the "
                   + "keyboard for itself while it is open — a combination "
                   + "assigned elsewhere on the desktop would simply vanish here."

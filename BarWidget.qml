@@ -115,6 +115,23 @@ BarWidget {
       bar.shell.toggle("io.github.baranskyi.omavoice", "{}")
   }
 
+  // The same thing Q does inside the panel, reachable without opening it.
+  //
+  // Worth having on the icon precisely because the icon is where you look when
+  // you want this: the glow says the microphone is open, and the thing you
+  // want at that moment is for it to stop — not to open a window first, find
+  // the key, and press it. The gesture is on the mark that told you.
+  //
+  // Not `endSession` verbatim, though. That one also drops the panel's socket,
+  // which for the bar would put out the status light along with the
+  // microphone, and a widget that goes dark when you ask it to stop listening
+  // is indistinguishable from one that crashed.
+  function stopListening() {
+    client.stopSession()
+    if (bar && bar.shell && typeof bar.shell.hide === "function")
+      bar.shell.hide("io.github.baranskyi.omavoice")
+  }
+
   // Always connected: the icon is a status light, and a status light that only
   // works while you are looking at the panel is pointless.
   Client { id: client; wanted: true }
@@ -134,10 +151,15 @@ BarWidget {
       if (!client.connected) return "Voice — daemon not running"
       if (client.errorText) return client.errorText
       if (!client.hasKey) return "Voice — no API key yet"
-      return "Voice · " + client.backend + " · " + client.voice
+      const what = "Voice · " + client.backend + " · " + client.voice
+      // Said only while it is true. A gesture nobody knows about is not a
+      // feature, but an instruction to stop something that is not running is
+      // just noise in a tooltip that is read at a glance.
+      return root.micOpen ? what + "\nRight-click to stop listening" : what
     }
     onPressed: function (b) {
       if (b === Qt.MiddleButton) client.setBackend(client.backend === "codex" ? "claude" : "codex")
+      else if (b === Qt.RightButton) root.stopListening()
       else root.togglePanel()
     }
 

@@ -176,7 +176,7 @@ all.
 |---|---|
 | Open the panel | `SUPER+CTRL+M`, or click the crystal in the bar |
 | Send it to the background | `Esc`, a click outside the panel, or the same hotkey |
-| Stop, keeping the conversation | `Q` in the panel, or `omavoice-ctl stop` |
+| Stop, keeping the conversation | `Q` in the panel, **right-click the crystal in the bar**, or `omavoice-ctl stop` |
 | Interrupt an answer | `I` in the panel, or `omavoice-ctl cancel` |
 | Start a new conversation | `N` in the panel, or `omavoice-ctl reset` |
 | Settings | ⚙ in the panel, or `omarchy-shell io.github.baranskyi.omavoice settings` |

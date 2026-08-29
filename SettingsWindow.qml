@@ -474,28 +474,47 @@ Item {
                   font.pixelSize: Style.font.body
                 }
 
-                Text {
-                  width: parent.width
-                  text: {
-                    if (root.consented.length === 0) return "No agent is allowed to answer yet"
-                    return "Allowed: " + root.consented.join(", ")
-                      + (root.unrestricted.length === 0
-                          ? " · held to the folder"
-                          : " · unrestricted: " + root.unrestricted.join(", "))
+                // A line per agent, in words. This used to read "Allowed:
+                // claude, codex · unrestricted: codex", which is the state
+                // written down rather than explained — it names a setting
+                // ("unrestricted") that appears under no such name anywhere
+                // the person can see, and it says nothing about the button
+                // beside it. Somebody looking for where to change this
+                // reasonably concluded the options had been removed.
+                Repeater {
+                  model: ["codex", "claude"]
+
+                  Text {
+                    id: agentLine
+                    required property string modelData
+                    readonly property bool allowed:
+                      root.consented.indexOf(agentLine.modelData) >= 0
+                    readonly property bool wide:
+                      root.unrestricted.indexOf(agentLine.modelData) >= 0
+
+                    width: parent.width
+                    text: agentLine.modelData + " — " + (!agentLine.allowed
+                      ? "not allowed to answer"
+                      : agentLine.wide
+                        ? "everything it can reach"
+                        : "held to this folder")
+                    textFormat: Text.PlainText
+                    wrapMode: Text.Wrap
+                    color: agentLine.wide ? Color.menu.text : Color.menu.text
+                    opacity: agentLine.allowed ? 0.55 : 0.3
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
                   }
-                  textFormat: Text.PlainText
-                  wrapMode: Text.Wrap
-                  color: Color.menu.text
-                  opacity: 0.4
-                  font.family: Style.font.family
-                  font.pixelSize: Style.font.caption
                 }
               }
 
+              // The ellipsis is the whole hint that this opens something. The
+              // folder and both permissions per agent live in that screen;
+              // nothing about them is set here.
               Button {
                 id: accessButton
                 anchors.verticalCenter: parent.verticalCenter
-                text: "Change"
+                text: "Change…"
                 bordered: true
                 foreground: Color.menu.text
                 accent: Color.accent

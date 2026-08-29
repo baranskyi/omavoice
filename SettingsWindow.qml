@@ -240,7 +240,7 @@ Item {
             Text {
               width: parent.width
               visible: !root.hasKey
-              text: "Add a key first — voices are read from the connected account."
+              text: "Add a key first — a voice needs a session to speak in."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text
@@ -441,7 +441,8 @@ Item {
               // different and much larger promise — codex's sandbox does not
               // make it, as an afternoon with the actual binary established.
               text: "codex runs on the ChatGPT subscription; claude brings its skills "
-                  + "and MCP connectors. Neither can change your files."
+                  + "and MCP connectors. Held to the folder, neither can change "
+                + "your files or reach a connector."
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text

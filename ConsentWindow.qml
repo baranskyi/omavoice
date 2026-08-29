@@ -452,15 +452,18 @@ Item {
               agent: "codex"
               granted: root.allowed("codex")
               wide: root.unbounded("codex")
-              detail: "Runs on your ChatGPT subscription. It cannot write "
-                    + "anything, anywhere, in either setting below."
+              detail: "Runs on your ChatGPT subscription. Held to the folder it "
+                    + "cannot write anywhere at all; widened, it is your own "
+                    + "codex with everything you have connected to it."
               wideDetail: root.unbounded("codex")
                 ? "Your own codex configuration applies in full: its MCP "
                   + "servers, its web search, and the rest of this machine."
                 : "Reading is confined by a permission profile built for this "
-                  + "one question — a path outside the folder does not exist "
-                  + "as far as the agent is concerned. Your MCP servers and "
-                  + "web search stay off while it is held here."
+                  + "one question: your files outside the folder do not exist "
+                  + "as far as the agent is concerned, though system files like "
+                  + "/etc and /usr stay readable. Web search is off, and so are "
+                  + "your MCP servers and every connector on the account — mail "
+                  + "and drive included."
               onToggled: function (value) { root.consentChanged("codex", value) }
               onWidened: function (value) { root.unrestrictChanged("codex", value) }
             }
@@ -469,8 +472,10 @@ Item {
               agent: "claude"
               granted: root.allowed("claude")
               wide: root.unbounded("claude")
-              detail: "Brings your skills and connectors. It cannot write or "
-                    + "edit anything in either setting below."
+              detail: "Brings your skills and connectors. Held to the folder it "
+                    + "cannot write, edit or run a shell; widened, it is your "
+                    + "own claude, with the permissions you have already given "
+                    + "it in the folders you work in."
               wideDetail: root.unbounded("claude")
                 ? "Your skills and MCP connectors apply in full — mail, "
                   + "calendar, whatever else you have connected — along with "
@@ -488,8 +493,16 @@ Item {
               text: "Every line above was measured rather than assumed: each "
                   + "agent was handed a file outside the folder, in both "
                   + "settings, to see what it would actually do with it.\n\n"
-                  + "Nothing is sent anywhere except OpenAI, for the voice, and "
-                  + "the agent you allowed."
+                  + (root.unrestricted.length === 0
+                      ? "Held to the folder, an agent talks to its own maker and "
+                      + "to nothing else: the voice goes to OpenAI, the question "
+                      + "goes to the agent, and no connector is loaded to send it "
+                      + "anywhere further. System files — /etc, /usr — stay "
+                      + "readable; what the folder bounds is your own work."
+                      : "With an agent widened, its connectors are loaded again, "
+                      + "and a connector is by construction someone else "
+                      + "receiving the question and answering it. Where that "
+                      + "reaches is whatever you have connected.")
               textFormat: Text.PlainText
               wrapMode: Text.Wrap
               color: Color.menu.text

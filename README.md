@@ -62,9 +62,12 @@ Everything here is external to the plugin and none of it is installed for you.
 | **PipeWire** with `pw-record` / `pw-play` | audio in and out | standard on Omarchy |
 | **Python 3.11+** | the daemon | `uv` is used if present, otherwise `python -m venv` |
 
-The only thing downloaded during setup is `websockets`, into a virtualenv under
-`~/.local/share/omavoice/`. Nothing is installed system wide and nothing asks
-for `sudo`.
+The only package downloaded during setup is `websockets`, into a virtualenv
+under `~/.local/share/omavoice/`. Nothing is installed system wide and nothing
+asks for `sudo`. One caveat: if `uv` is present, `setup.sh` uses it to build
+the virtualenv against Python 3.13, and `uv` will fetch a standalone
+interpreter when the system has none — that download is outside the lockfile
+and outside `--require-hashes`.
 
 It is installed from `daemon/requirements.lock`, where the version is pinned
 and every artifact is bound to a digest, with `--require-hashes` — which
@@ -420,6 +423,15 @@ draw a widget. Plainly, what it does:
     makes the whole filesystem unwritable and leaves the sandbox with no
     network. A path outside the folder does not merely fail — it does not
     exist.
+  - `codex` also runs with `--disable apps --disable plugins`. This matters
+    more than the per-server disabling next to it: beyond the MCP servers
+    written in `~/.codex/config.toml`, codex carries a built-in server holding
+    every connector the ChatGPT account has authorised — on the machine this
+    was found on, 464 tools across 18 accounts, `gmail.send_email` among them.
+    None of it appears in the config file or in `codex mcp list`, so naming
+    servers one at a time reached none of it, and until v0.9.0 a sentence said
+    near the laptop could have sent mail. Verified by listing the live servers
+    with and without the switches.
   - `claude` runs under `--permission-mode dontAsk` with `--strict-mcp-config`,
     `--setting-sources ""`, and the write and web tools denied by name. Both
     halves matter. `dontAsk` refuses what would have asked — but not what you
@@ -453,8 +465,11 @@ draw a widget. Plainly, what it does:
   turn it on, and turning it on is what the screen describes rather than what
   it hides. In that mode the command line is exactly what it was before any of
   this scoping existed, so there is no second configuration to drift.
-- **Requests that consist of a destructive command** (`rm -rf`, `mkfs`,
-  `shutdown`) never reach the agent.
+- **Requests that read as a destructive command** (`rm -rf`, `mkfs`,
+  `shutdown`) are refused before the agent is asked. A guard against accident,
+  not against an attacker: it is a pattern match over a transcript, and "delete
+  everything in my home directory" walks straight through it. What actually
+  prevents the damage is that a bounded agent cannot write at all.
 - **The key** lives in `~/.config/omavoice/key`, mode `600`, in a file of its
   own that systemd does not load. It is read once by the daemon and removed
   from the process environment immediately, so no child inherits it — not the
@@ -480,9 +495,16 @@ draw a widget. Plainly, what it does:
   in part; and every field that survives into an answer — spoken text,
   markdown, the number of links and files and the length of each — is cut to
   size before it is retained or broadcast.
-- **Links and paths from an answer** are opened through an argv vector with a
-  scheme check: their source is a retelling of untrusted content.
-- **Images are stripped out of markdown** so the shell never fetches them.
+- **Links and paths from an answer** are opened through an argv vector, never
+  a shell string, because their source is a retelling of untrusted content. A
+  link must also match `http(s)://`. A path is only checked for being absolute
+  — `xdg-open` then dispatches it by type, so a file the agent names is opened
+  by whatever handles it. You have to click the button, and the button's label
+  came from the agent too.
+- **Images are stripped out of markdown** — the inline form, the reference
+  form and inline `<img>` — so the shell does not fetch a URL chosen by a model
+  that is retelling untrusted content. Only the inline form was covered until
+  v0.9.0; the reference form renders in Qt and was getting through.
 - **No `sudo`, no `curl | sh`, no package installation outside the virtualenv.**
 
 ## Cost

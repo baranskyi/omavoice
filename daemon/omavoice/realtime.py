@@ -108,15 +108,46 @@ Missing one sentence is better than talking to an empty room.
 """
 
 
-ASK_AGENT_TOOL = {
+def ask_agent_tool(cfg) -> dict:
+    """The tool description, told the truth about what the agent can reach.
+
+    This used to be a constant saying the agent had "this computer's
+    filesystem, its shell and the internet" — which is what the agent has when
+    the person has widened it, and a lie in the default state, where reading is
+    held to one folder, the web tools are off and the connectors are disabled.
+    Two things went wrong with that. The model routed web and shell questions to
+    an agent that could not serve them and then spoke the refusal, or something
+    it made up, in the person's own language. And the permissive account was the
+    one that reached the model while the restrictive one reached the human, so
+    the two halves of the product described different programs.
+    """
+    wide = cfg.backend in cfg.unrestricted
+    if wide:
+        reach = (
+            "It has this computer's filesystem, its shell, its connectors and "
+            "the internet."
+        )
+    else:
+        folder = str(cfg.brain_cwd) if cfg.brain_cwd else "a folder the person chose"
+        reach = (
+            f"It can read {folder} and nothing else of theirs — no other folder, "
+            "no web search, no connectors, and no shell. If a question needs "
+            "something outside that, say so plainly instead of guessing; the "
+            "person can widen it in the panel's settings."
+        )
+    return dict(
+        ASK_AGENT_SHAPE,
+        description=(
+            "Ask the local agent. Use it for ANY question of fact: files, "
+            "projects, code, configs, processes, and equally people, companies, "
+            "news, documentation, anything in the outside world. " + reach
+        ),
+    )
+
+
+ASK_AGENT_SHAPE = {
     "type": "function",
     "name": "ask_agent",
-    "description": (
-        "Ask the local agent, which has access to this computer's filesystem, its "
-        "shell and the internet. Use it for ANY question of fact: files, projects, "
-        "code, configs, processes, and equally people, companies, news, "
-        "documentation, anything in the outside world."
-    ),
     "parameters": {
         "type": "object",
         "additionalProperties": False,
@@ -208,7 +239,7 @@ class RealtimeSession:
                 "session": {
                     "type": "realtime",
                     "instructions": instructions_for(config.gender_of(self.cfg.voice)),
-                    "tools": [ASK_AGENT_TOOL],
+                    "tools": [ask_agent_tool(self.cfg)],
                     "tool_choice": "auto",
                     "audio": {
                         "input": {

@@ -7,8 +7,9 @@ local coding agent that can read this machine as well as the web.
 Two backends, same contract. Both are asked to return JSON matching
 schemas/answer.json, so the panel never has to parse prose:
 
-    codex   `codex exec` on the ChatGPT subscription, sandboxed read-only.
-            Native --output-schema, so the shape is enforced by the CLI.
+    codex   `codex exec` on the ChatGPT subscription. Native --output-schema,
+            so the shape is enforced by the CLI. Held to the chosen folder by
+            a permission profile — not by --sandbox, which bounds writes only.
     claude  `claude -p` with the schema pressed into the prompt. More
             integrations (skills, MCP), no schema enforcement, so we repair.
 
@@ -677,6 +678,25 @@ class Brain:
             # The model's own search tool, which runs at OpenAI rather than in
             # the sandbox and is therefore untouched by anything above.
             "-c", 'web_search="disabled"',
+            # And the two that matter most, which naming servers one by one
+            # does not reach.
+            #
+            # Beyond the MCP servers written in config.toml, codex carries a
+            # built-in server of its own — `codex_apps` — holding every
+            # connector the ChatGPT account has authorised. On this machine
+            # that is 464 tools across 18 accounts, including
+            # `gmail.send_email`, `gmail.delete_emails`, Drive, Calendar,
+            # Notion, GitHub, and `plugin_management.update_app_permissions`,
+            # with which the model can widen its own permissions. Installed
+            # plugins add more, including local stdio servers of their own.
+            #
+            # None of them appear in config.toml and none are listed by
+            # `codex mcp list`, so enumerating names from the config missed all
+            # of them: a sentence said near this laptop could have sent mail.
+            # These two switches take the lot, verified against a live server
+            # listing rather than against the absence of an error.
+            "--disable", "apps",
+            "--disable", "plugins",
         ]
         for name in _codex_mcp_servers():
             flags += ["-c", f"mcp_servers.{name}.enabled=false"]
@@ -697,19 +717,16 @@ class Brain:
             f"Question: {query}"
         )
 
-        # Plan mode is what keeps claude reading rather than editing, and its
-        # file tools are held to the working directory — a path outside it
-        # comes back as a request for permission, which in a non-interactive
-        # run is nobody's to grant. The explicit denials are belt and braces:
-        # plan mode phrases its refusal as a question, and a question with no
-        # one to answer it is a weaker thing to rely on than a refusal.
+        # Two invocations, and only one of them claims a boundary.
         #
-        # Note what is *not* denied. The connectors, the MCP servers and the
-        # shell are all left alone, because that is exactly what the consent
-        # screen asked about and exactly what was granted. A permission that
+        # The widened branch is the person's own claude: plan mode, the write
+        # tools denied by name, and nothing else touched. Its settings load,
+        # its connectors load, its shell runs. That is what was asked for on
+        # the consent screen and what was granted, and a permission that
         # quietly withholds half of what it promised is worse than no
-        # permission: the person stops being able to predict what they agreed
-        # to.
+        # permission. It is NOT a folder boundary — plan mode refuses by
+        # asking, and the accumulated permissions in ~/.claude.json mean there
+        # is often nothing left to ask about. See the note on the other branch.
         #
         # Order matters here for a reason that has nothing to do with meaning:
         # --disallowedTools is variadic, so it keeps eating arguments until it

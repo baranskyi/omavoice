@@ -136,7 +136,16 @@ Item {
   // answer needs an image, and the URLs come from summarised web content, so
   // they are stripped rather than trusted.
   function safeMarkdown(text) {
-    return String(text || "").replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+    // Three forms, not one. The inline `![alt](url)` was the only one being
+    // stripped, and Qt's markdown renderer also resolves the reference form —
+    // `![alt][ref]` on one line, `[ref]: https://…` on another — and inline
+    // HTML. Any of them makes the shell fetch a URL chosen by a model that is
+    // retelling untrusted web content, which is a beacon, not a picture.
+    return String(text || "")
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
+      .replace(/!\[[^\]]*\]\s*\[[^\]]*\]/g, "")
+      .replace(/^\s*\[[^\]]+\]:\s*\S+.*$/gm, "")
+      .replace(/<\s*img\b[^>]*>/gi, "")
   }
 
   Client {

@@ -27,6 +27,8 @@ import time
 import json
 from pathlib import Path
 
+import websockets
+
 from . import config, devices as device_choice, ipc
 from .audio import (
     AutoGain,
@@ -119,9 +121,9 @@ class Daemon:
         # True after a stop: socket open and the conversation intact, but
         # nothing heard and nothing said.
         self.paused = False
-        # Set when the API closes a connection for having lasted an hour, so
-        # the teardown that follows can tell an ordinary ending from a fault.
-        self._session_expired = False
+        # Why the connection ended, when it ended by itself: "" for a fault,
+        # otherwise a reason the teardown can act on and put into words.
+        self._session_ended = ""
         self.autogain = AutoGain(chunk_ms=cfg.chunk_ms)
         self.devices: device_choice.Devices | None = None
         # Microphones that failed to produce audio while this daemon has been
@@ -705,7 +707,7 @@ class Daemon:
             # rather than to colour the bar red.
             if "maximum duration" in message.lower():
                 log.info("the API ended the session at its hour limit")
-                self._session_expired = True
+                self._session_ended = "hour"
                 self._emit("session", "an hour is the API's limit — this conversation ends here")
                 return
 
@@ -792,28 +794,46 @@ class Daemon:
             await session.run()
         except asyncio.CancelledError:
             raise
+        except websockets.ConnectionClosed as closed:
+            # A socket that ended is not a fault, and calling it one is how a
+            # panel came to sit in the bar saying "error" after half an hour of
+            # nobody touching it. An idle connection gets dropped — a keepalive
+            # ping goes unanswered, a laptop suspends, a network moves — and
+            # none of that is something the person did wrong or can fix.
+            #
+            # It is told apart from a real failure by its type, not by reading
+            # its message: ConnectionClosed is what the transport raises when
+            # the conversation is over, and everything else really is a fault.
+            log.info("realtime connection closed: %s", closed)
+            self._session_ended = "closed"
         except Exception as exc:  # noqa: BLE001
             log.exception("realtime session died")
             self.server.broadcast({"type": "error", "message": str(exc)})
             self._set_state("error", message=str(exc))
         finally:
             if self.session is session:
-                expired = self._session_expired
-                self._session_expired = False
+                ended = self._session_ended
+                self._session_ended = ""
                 # Whether the microphone was open, asked before the teardown
                 # closes it: it is the difference between a person sitting
                 # here mid-sentence and a panel left open since this morning.
                 attended = self.mic.listening and not self.paused
                 await self.stop_session()
-                if expired and attended:
+                if ended and attended:
                     # Carried on rather than handed back, because from where
                     # the person is sitting nothing happened except that the
-                    # assistant forgot the last hour. Saying so is enough.
-                    self._emit("session", "reconnecting — the previous hour is forgotten")
+                    # assistant forgot what came before. Saying so is enough.
+                    self._emit(
+                        "session",
+                        "reconnecting — the previous hour is forgotten"
+                        if ended == "hour"
+                        else "the connection dropped — starting a fresh one",
+                    )
                     await self.start_session()
-                elif expired:
-                    # Nobody at the microphone. Reopening would spend another
-                    # hour of somebody's money on an empty room.
+                elif ended:
+                    # Nobody at the microphone. Reopening would spend more of
+                    # somebody's money on an empty room, and an idle socket
+                    # that quietly went away is not news worth a red light.
                     self._set_state("idle")
 
     async def pause_session(self) -> dict:
@@ -955,7 +975,11 @@ class Daemon:
 
         if command == "foreground":
             if self.session is None:
-                return {"ok": True, "background": False}
+                # There was a session and now there is not — the socket was
+                # dropped while the panel was away. Coming back used to return
+                # a cheerful ok and leave a dead panel on screen.
+                self.backgrounded = False
+                return await self.start_session()
             self.backgrounded = False
             # Nothing was stopped, so nothing needs starting — except after a
             # Q, which is the one thing that does release the microphone.

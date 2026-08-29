@@ -216,7 +216,7 @@ _PROFILE = "omavoice"
 
 
 def _codex_root() -> str:
-    """Where the codex binary actually lives.
+    """The directory holding the codex binary.
 
     The profile is built by addition rather than subtraction — a `deny` beats a
     more specific `read`, so "everything except" cannot be expressed — and that
@@ -224,12 +224,19 @@ def _codex_root() -> str:
     is going to run. Left out, codex cannot exec itself: `bwrap: execvp ...: No
     such file or directory`, which reads as a broken agent rather than as a
     missing path.
+
+    The containing directory and no more. This used to take the grandparent,
+    which is the right answer for exactly one install layout — the nested
+    `…/installs/codex/<version>/bin/codex` this machine happens to use — and a
+    bad one everywhere else: `~/.local/bin/codex` would have granted the whole
+    of `~/.local`, keyrings included, and `/usr/bin/codex` the whole of `/usr`.
+    Granting only `…/bin` was tested against the nested layout and codex starts
+    from it just as well.
     """
     found = shutil.which("codex")
     if not found:
         return ""
-    # …/installs/codex/0.149.1/bin/codex -> …/installs/codex/0.149.1
-    return str(Path(found).resolve().parent.parent)
+    return str(Path(found).resolve().parent)
 
 
 def _codex_mcp_servers() -> list[str]:
@@ -718,16 +725,37 @@ class Brain:
                 "--permission-mode", "plan",
             ]
         else:
-            # `plan` refuses a write by *asking*, and a question nobody can
-            # answer is a weaker thing than a refusal. `dontAsk` turns every
-            # such question into a denial, which is what makes the working
-            # directory an actual edge: a path outside it comes back refused
-            # rather than read. Measured, both ways round.
+            # `dontAsk` denies anything that would otherwise have asked, and
+            # that is what turns the working directory into an edge — but only
+            # together with the flag below, which is the whole lesson here.
+            #
+            # `dontAsk` denies what would ASK. It does not deny what the person
+            # has already allowed. Claude Code accumulates permissions per
+            # project in ~/.claude.json, so in a directory somebody has been
+            # working in for weeks there is nothing left to ask about, and the
+            # mode denies nothing at all: a read of /tmp outside the workspace
+            # came back with the file's contents and an empty
+            # `permission_denials`. In a directory with no history the same
+            # command was refused. The boundary was the person's own config,
+            # not this argv.
+            #
+            # `--setting-sources ""` loads none of those files, so the run
+            # starts with no accumulated permissions and the mode has something
+            # to refuse. With it, on the very directory that failed before,
+            # both the Read and the shell fallback come back denied — taken
+            # from the envelope's `permission_denials`, not from asking the
+            # model what it was allowed to do, which is how this was got wrong
+            # the first time.
+            #
+            # It costs the shell: with nothing pre-allowed, Bash is refused
+            # too. That is the price of the edge, and it is the right way
+            # round — an unconfined shell makes any file scoping decorative.
             argv = [
                 "claude", "-p",
                 "--disallowedTools",
                 "Write,Edit,MultiEdit,NotebookEdit,WebFetch,WebSearch,WebBrowser",
                 "--strict-mcp-config",
+                "--setting-sources", "",
                 "--output-format", "json",
                 "--permission-mode", "dontAsk",
             ]

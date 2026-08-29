@@ -475,9 +475,10 @@ Item {
                 ? "Your skills and MCP connectors apply in full — mail, "
                   + "calendar, whatever else you have connected — along with "
                   + "the web and the rest of this machine."
-                : "A path outside the folder is refused rather than read, and "
-                  + "its MCP servers and web tools stay switched off while it "
-                  + "is held here."
+                : "A path outside the folder is refused rather than read. Its "
+                  + "MCP servers and web tools stay off while it is held here, "
+                  + "and so does its shell — an unconfined shell would walk "
+                  + "straight past the folder."
               onToggled: function (value) { root.consentChanged("claude", value) }
               onWidened: function (value) { root.unrestrictChanged("claude", value) }
             }

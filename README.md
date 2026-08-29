@@ -420,19 +420,32 @@ draw a widget. Plainly, what it does:
     makes the whole filesystem unwritable and leaves the sandbox with no
     network. A path outside the folder does not merely fail — it does not
     exist.
-  - `claude` runs under `--permission-mode dontAsk` with `--strict-mcp-config`
-    and the write and web tools denied by name. Plan mode was not enough: it
-    refuses by *asking*, and a question nobody can answer is weaker than a
-    refusal.
+  - `claude` runs under `--permission-mode dontAsk` with `--strict-mcp-config`,
+    `--setting-sources ""`, and the write and web tools denied by name. Both
+    halves matter. `dontAsk` refuses what would have asked — but not what you
+    have already allowed, and Claude Code accumulates permissions per project,
+    so in a directory you have worked in for weeks it refuses nothing.
+    `--setting-sources ""` loads none of those files, so there is nothing
+    pre-allowed and the mode has something to refuse. It costs the shell: with
+    no accumulated permissions, `Bash` is denied too. That is the right way
+    round — an unconfined shell makes any file scoping decorative.
 
-  Note for anyone reading the code: in bounded mode codex is deliberately
-  **not** given `--sandbox read-only`. Passing that flag discards
+  Two notes for anyone reading the code. In bounded mode codex is deliberately
+  **not** given `--sandbox read-only`: passing that flag discards
   `default_permissions` and silently drops the profile, while still printing
-  `sandbox: read-only`. The profile is the stronger of the two.
-- **Everything above is measured, not quoted.** Each agent was handed a file
-  outside the folder, in both settings, to see what it actually did. That is
-  also how the previous version's "read-only" claim was found to be a claim
-  about writing only.
+  `sandbox: read-only`. And the profile's `:minimal` preset does grant the
+  system paths — `/etc`, `/usr`, `/bin`, `/lib` — so "outside the folder" means
+  your files, not every byte on the disk. No user data outside the folder is
+  reachable: `~/.ssh`, `~/.codex`, `~/.config/omavoice/key`, `/tmp` and every
+  other project all come back as though they did not exist.
+- **Everything above is measured, not quoted** — and measured from the
+  evidence rather than from the agent's own account of itself. Each agent was
+  handed a canary file outside the folder, in both settings; what is recorded
+  here is what the session transcript and the run envelope's
+  `permission_denials` show, not what the model said it was allowed to do.
+  Asking the model was how two earlier claims in this file came to be wrong:
+  the "read-only" sandbox that bounded only writes, and a `dontAsk` that
+  reported a refusal it had not actually been given.
 - **You can lift it, per agent, and it says so plainly.** The second permission
   in the same screen — `omavoice-ctl unrestrict <agent>`, undone with
   `restrict` — hands the agent everything it can normally do: your MCP

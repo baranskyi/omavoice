@@ -155,6 +155,11 @@ class Daemon:
         # is happening now, and a trace from a question already answered would
         # be a lie told quietly.
         self.brain.watch(self._on_trace)
+        # Whether the five cards explaining this have been seen. Kept with the
+        # preferences rather than in the plugin's own config: it is a fact about
+        # the person, like the folder and the grants, and it should survive a
+        # plugin being removed and put back.
+        self.onboarded = False
         self._prefs_path = cfg.state_dir / "preferences.json"
         self._load_preferences()
 
@@ -195,6 +200,7 @@ class Daemon:
                         "workspace": str(self.cfg.brain_cwd or ""),
                         "consented": sorted(self.cfg.consented),
                         "unrestricted": sorted(self.cfg.unrestricted),
+                        "onboarded": bool(self.onboarded),
                     },
                     indent=2,
                 )
@@ -213,6 +219,7 @@ class Daemon:
         backend = str(data.get("backend") or "")
         if backend in ("codex", "claude"):
             self.brain.backend = backend
+        self.onboarded = bool(data.get("onboarded"))
         # An environment variable is a deliberate override and outranks a
         # remembered choice from the settings window.
         if not os.environ.get("OMAVOICE_INPUT"):
@@ -277,6 +284,11 @@ class Daemon:
             # Named so the panel can raise the consent screen by itself rather
             # than working the condition out again and getting it half right.
             "needed": bool(self.brain.denial()),
+            # Carried here because it is the same kind of thing and arrives at
+            # the same moment: what the person has already been asked and
+            # answered. The panel raises the tour off this exactly as it raises
+            # the consent screen off `needed`.
+            "onboarded": bool(self.onboarded),
         }
 
     def _broadcast_access(self) -> None:
@@ -1130,6 +1142,16 @@ class Daemon:
             # chosen, what was allowed, and what this machine offers to choose
             # from.
             return {"ok": True, **self._access(), "folders": self._folders()}
+
+        if command == "onboarded":
+            # Sent when the tour is dismissed, by any of its exits — finishing
+            # it, skipping it, Esc. Skipping counts: a person who closed it
+            # chose to, and showing it again the next morning would be the
+            # program disagreeing with them.
+            self.onboarded = bool(message.get("value", True))
+            self._save_preferences()
+            self._broadcast_access()
+            return {"ok": True, "onboarded": self.onboarded}
 
         if command == "workspace":
             value = str(message.get("value") or "").strip()

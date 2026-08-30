@@ -32,6 +32,15 @@ Item {
   property bool settingsOpen: false
   property bool helpOpen: false
   property bool consentOpen: false
+  // Asked for from settings. Distinct from `tourNeeded`, which is the first
+  // time and raises itself.
+  property bool tourOpen: false
+  // The introduction comes before the consent screen and suppresses it: the
+  // first question this program asks is which folder an agent may read, and
+  // being asked that before being told what it means is how a person picks
+  // home and moves on.
+  readonly property bool tourNeeded: !client.onboarded && root.opened
+  readonly property bool tourShowing: root.tourOpen || root.tourNeeded
   // Whether the waterfall is folded away. The answer is not: that is the thing
   // that was asked for, and hiding it along with the log was the eye doing more
   // than it says. What goes is the running commentary — heard, asked, took 8s —
@@ -177,6 +186,7 @@ Item {
     function toggle(): void { root.toggle() }
     function settings(): void { root.settingsOpen = !root.settingsOpen }
     function help(): void { root.helpOpen = !root.helpOpen }
+    function tour(): void { root.tourOpen = !root.tourOpen }
     function access(): void { root.consentOpen = !root.consentOpen }
     function reset(): void { client.reset() }
     function state(): string { return client.voiceState }
@@ -191,7 +201,7 @@ Item {
     // is the reason nothing is happening, and hiding it with the panel would
     // leave the assistant silently refusing every question with the
     // explanation one layer out of reach.
-    open: root.consentOpen || (client.accessNeeded && root.opened)
+    open: root.consentOpen || (client.accessNeeded && root.opened && !root.tourShowing)
     workspace: client.workspace
     consented: client.consented
     unrestricted: client.unrestricted
@@ -212,6 +222,20 @@ Item {
     onClosed: root.helpOpen = false
   }
 
+  OnboardingWindow {
+    id: onboardingWindow
+    open: root.tourShowing
+    backend: client.backend
+    workspace: client.workspace
+    // Every exit is the same exit. Whether it was read to the end or closed on
+    // the first card, it does not come back by itself — Settings brings it back
+    // when it is wanted.
+    onClosed: {
+      root.tourOpen = false
+      if (!client.onboarded) client.markOnboarded()
+    }
+  }
+
   SettingsWindow {
     id: settingsWindow
     open: root.settingsOpen && root.opened
@@ -230,6 +254,10 @@ Item {
     onAccessRequested: {
       root.settingsOpen = false
       root.consentOpen = true
+    }
+    onTourRequested: {
+      root.settingsOpen = false
+      root.tourOpen = true
     }
     onVoicePicked: function (name) { client.setVoice(name) }
     onBackendPicked: function (name) { client.setBackend(name) }

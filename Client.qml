@@ -63,6 +63,11 @@ Item {
   property bool accessNeeded: false
   property var folderChoices: []
 
+  // Whether the introduction has been seen. True until the daemon says
+  // otherwise: the wrong way round would flash five cards at everyone who has
+  // already read them, for as long as the first message takes to arrive.
+  property bool onboarded: true
+
   function backendAllowed(name) {
     return root.consented.indexOf(String(name)) >= 0
   }
@@ -159,6 +164,7 @@ Item {
     return send({ cmd: "unrestrict", backend: String(name), granted: granted === true })
   }
   function askAccess() { return send({ cmd: "access", id: 7 }) }
+  function markOnboarded() { return send({ cmd: "onboarded", value: true }) }
 
   function clearConversation() {
     eventModel.clear()
@@ -213,6 +219,7 @@ Item {
       root.consented = Array.isArray(message.consented) ? message.consented : []
       root.unrestricted = Array.isArray(message.unrestricted) ? message.unrestricted : []
       root.accessNeeded = message.needed === true
+      if (message.onboarded !== undefined) root.onboarded = message.onboarded === true
       if (Array.isArray(message.folders)) root.folderChoices = message.folders
       break
     case "audio":

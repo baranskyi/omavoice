@@ -40,6 +40,7 @@ Item {
   signal inputPicked(string name)
   signal keySubmitted(string key)
   signal accessRequested()
+  signal tourRequested()
 
   onOpenChanged: {
     if (open) {
@@ -520,6 +521,41 @@ Item {
                 accent: Color.accent
                 fontFamily: Style.font.family
                 onClicked: root.accessRequested()
+              }
+            }
+
+            PanelSectionHeader { width: parent.width; text: "Introduction" }
+
+            // The five cards shown on the first run. Findable afterwards on
+            // purpose: what a folder means here, and what the colours are, are
+            // the two things people come back for, and a tour that can only be
+            // seen once is a tour nobody can check.
+            Row {
+              width: parent.width
+              spacing: Style.spaceReal(12)
+
+              Text {
+                width: parent.width - tourButton.width - Style.spaceReal(12)
+                anchors.verticalCenter: parent.verticalCenter
+                text: "What this is, in five cards — the voice, the agent, the "
+                    + "folder, how far it may reach, and the keys."
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                color: Color.menu.text
+                opacity: 0.55
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+              }
+
+              Button {
+                id: tourButton
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Show again…"
+                bordered: true
+                foreground: Color.menu.text
+                accent: Color.accent
+                fontFamily: Style.font.family
+                onClicked: root.tourRequested()
               }
             }
 

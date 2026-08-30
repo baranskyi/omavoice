@@ -434,6 +434,16 @@ class Microphone:
         # Every chunk ever delivered, so throughput can be measured against the
         # clock rather than inferred from the process still being alive.
         self.chunks_total = 0
+        # Targets already proven deaf during the current recovery, "" being the
+        # system default. Without it the two repair paths cancel each other out:
+        # the retry loop gives up on the default and switches to the fallback,
+        # and the presence check at the top of _spawn finds that fallback absent
+        # and puts the target back to the default — so the giving-up branch,
+        # which tests `target == fallback_target`, is never reached and the pair
+        # alternates forever. Measured at eighteen seconds a lap: three
+        # pw-record spawns and, on a Bluetooth card, a profile switch each way.
+        # Cleared the moment any device actually delivers a second of audio.
+        self._deaf: set[str] = set()
 
     @property
     def listening(self) -> bool:
@@ -478,6 +488,10 @@ class Microphone:
                     self.target,
                 )
                 self._fault(f"{self.target} is gone — using the default microphone")
+                # Absent counts as deaf. Otherwise this rewrite is invisible to
+                # the retry loop, which then offers the same missing device
+                # again as its fallback.
+                self._deaf.add(self.target)
                 self.target = ""
 
         argv = [*_PDEATHSIG, "pw-record", *_pw_common(self.cfg)]
@@ -538,7 +552,14 @@ class Microphone:
             # restarted forever and never reached the fallback it was owed.
             # The same second-of-audio bar the limit below uses.
             healthy = 1000 // max(1, self.cfg.chunk_ms)
-            attempts = 0 if delivered >= healthy else attempts + 1
+            if delivered >= healthy:
+                attempts = 0
+                # Something works. Whatever was written off during the outage
+                # may well work again — a headset comes back, a dock is plugged
+                # in — so the slate is clean for the next one.
+                self._deaf.clear()
+            else:
+                attempts += 1
             log.warning(
                 "microphone stream ended after %d chunks (%d this session, "
                 "pw-record exit=%s, target=%r) — restarting, attempt %d",
@@ -555,7 +576,12 @@ class Microphone:
             worked = self.chunks_total >= 1000 // max(1, self.cfg.chunk_ms)
             limit = self.MAX_RETRIES if worked else self.COLD_RETRIES
             if attempts >= limit:
-                if self.fallback_target and self.target != self.fallback_target:
+                self._deaf.add(self.target)
+                if (
+                    self.fallback_target
+                    and self.target != self.fallback_target
+                    and self.fallback_target not in self._deaf
+                ):
                     log.error(
                         "microphone %r never produced audio — falling back to %r",
                         self.target or "system default",

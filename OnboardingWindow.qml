@@ -52,18 +52,21 @@ Item {
 
   // -- palette on the scrim ---------------------------------------------------
 
-  readonly property color ink: "white"
-  readonly property color inkDim: Qt.rgba(1, 1, 1, 0.55)
-  readonly property color inkFaint: Qt.rgba(1, 1, 1, 0.26)
-  readonly property color hairline: Qt.rgba(1, 1, 1, 0.16)
-
-  // The accent still carries the plugin's identity, but a theme is free to
-  // pick one that vanishes on black. Lift it when it would.
-  readonly property color mark: {
-    const a = Color.accent
-    const luminance = a.r * 0.299 + a.g * 0.587 + a.b * 0.114
-    return luminance < 0.42 ? Qt.lighter(a, 1.0 + (0.42 - luminance) * 4.0) : a
-  }
+  // On a card, not on the scrim. Floating the content straight onto a darkened
+  // desktop is what the speed test does, and it works there because two large
+  // dials carry their own contrast. Five screens of small type do not: over a
+  // photograph the wallpaper reads straight through the words, and the whole
+  // thing looks like something that failed to finish loading rather than like
+  // part of the program. So the tour sits on the same surface every other
+  // window here sits on, and keeps the deep scrim outside it.
+  readonly property color ink: Color.menu.text
+  readonly property color inkDim: Qt.rgba(
+    Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.62)
+  readonly property color inkFaint: Qt.rgba(
+    Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.34)
+  readonly property color hairline: Qt.rgba(
+    Color.menu.text.r, Color.menu.text.g, Color.menu.text.b, 0.20)
+  readonly property color mark: Color.accent
 
   StateHues { id: hues }
 
@@ -259,21 +262,10 @@ Item {
     spacing: Style.spaceReal(6)
     width: parent ? parent.width : 0
 
-    Row {
-      spacing: Style.spaceReal(8)
-      AgentBadge {
-        agent: grant.agent
-        anchors.verticalCenter: parent.verticalCenter
-      }
-      Text {
-        anchors.verticalCenter: parent.verticalCenter
-        text: grant.agent
-        textFormat: Text.PlainText
-        color: root.ink
-        font.family: Style.font.family
-        font.pixelSize: Style.font.bodySmall
-      }
-    }
+    // No name beside it: the badge is already the name, in the vendor's own
+    // colours, and printing "codex" next to a pill that says codex reads as a
+    // rendering fault rather than as a label.
+    AgentBadge { agent: grant.agent }
 
     Row {
       spacing: Style.spaceReal(4)
@@ -317,7 +309,10 @@ Item {
     id: heading
     required property string eyebrow
     required property string title
-    width: parent ? parent.width : 0
+    // Stops short of the dismiss mark in the card's corner. Only the heading
+    // needs the clearance, so only the heading gives it up — indenting every
+    // card by the same amount would push the whole thing off centre.
+    width: parent ? parent.width - Style.spaceReal(26) : 0
     spacing: Style.spaceReal(6)
 
     Text {
@@ -390,24 +385,45 @@ Item {
         }
       }
 
-      Item {
-        id: stage
+      // The same surface every other window in this plugin stands on. What was
+      // here before — content floating straight on the scrim, the way the
+      // shell's speed test does it — reads on a dark wallpaper and disappears
+      // on a photograph, and five screens of small type cannot carry their own
+      // contrast the way two big dials can.
+      BorderSurface {
+        id: card
         anchors.centerIn: parent
-        width: deck.width
-        height: deck.height + foot.height + Style.spaceReal(22)
-        // A short display shrinks the whole thing rather than clipping it.
+        // The width of the panel this describes, so what is explained arrives
+        // at the size it was explained at.
+        width: Style.space(596)
+        height: Style.space(468)
+        radius: Style.cornerRadius
+        color: Color.menu.background
+        borderSpec: Border.surfaceSpec(
+          "menu", "border", Color.menu.border, Math.max(1, Style.space(2)))
+        padding: Style.spacing.panelPadding
+        // A short display shrinks the whole card rather than clipping it.
         scale: Math.min(1,
           (keyCatcher.width - Style.space(48)) / Math.max(1, width),
           (keyCatcher.height - Style.space(48)) / Math.max(1, height))
 
         MouseArea { anchors.fill: parent; onClicked: {} }
 
-        // The card is the width of the panel itself, so what is described here
-        // arrives at the size it was described at.
+        Item {
+          id: stage
+          anchors.fill: parent
+          anchors.topMargin: card.contentTopInset
+          anchors.rightMargin: card.contentRightInset
+          anchors.bottomMargin: card.contentBottomInset
+          anchors.leftMargin: card.contentLeftInset
+
         Item {
           id: deck
-          width: Style.space(560)
-          height: Style.space(408)
+          anchors.top: parent.top
+          anchors.left: parent.left
+          anchors.right: parent.right
+          anchors.bottom: foot.top
+          anchors.bottomMargin: Style.spacing.panelGap
           clip: true
 
           Row {
@@ -424,8 +440,12 @@ Item {
               height: deck.height
 
               Column {
-                anchors.fill: parent
-                anchors.rightMargin: Style.spaceReal(4)
+                anchors.left: parent.left
+                anchors.right: parent.right
+                // Centred rather than pinned to the top: the cards do not hold
+                // the same amount, and a short one left a third of the card
+                // empty below it, which reads as something missing.
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.spacing.panelGap
 
                 Heading {
@@ -523,8 +543,12 @@ Item {
               height: deck.height
 
               Column {
-                anchors.fill: parent
-                anchors.rightMargin: Style.spaceReal(4)
+                anchors.left: parent.left
+                anchors.right: parent.right
+                // Centred rather than pinned to the top: the cards do not hold
+                // the same amount, and a short one left a third of the card
+                // empty below it, which reads as something missing.
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.spacing.panelGap
 
                 Heading {
@@ -551,46 +575,30 @@ Item {
                   border.width: 1
                   border.color: Qt.rgba(root.mark.r, root.mark.g, root.mark.b, 0.45)
 
-                  Row {
+                  Column {
                     anchors.centerIn: parent
-                    spacing: Style.spaceReal(30)
+                    spacing: Style.spaceReal(10)
 
-                    Repeater {
-                      model: ["codex", "claude"]
+                    // Each badge at its own size. The badge is a pill that
+                    // already carries both the vendor's glyph and the agent's
+                    // name; the box it was in before squeezed the pill to a
+                    // square and pushed its label out through the sides.
+                    Row {
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      spacing: Style.spaceReal(14)
 
-                      Column {
-                        id: agentColumn
-                        required property string modelData
-                        spacing: Style.spaceReal(7)
-
-                        Item {
-                          width: Style.spaceReal(22)
-                          height: Style.spaceReal(22)
-                          anchors.horizontalCenter: parent.horizontalCenter
-                          AgentBadge { anchors.fill: parent; agent: agentColumn.modelData }
-                        }
-
-                        Text {
-                          anchors.horizontalCenter: parent.horizontalCenter
-                          text: agentColumn.modelData === "codex" ? "codex CLI" : "claude CLI"
-                          textFormat: Text.PlainText
-                          color: root.ink
-                          font.family: Style.font.family
-                          font.pixelSize: Style.font.bodySmall
-                        }
-                      }
+                      AgentBadge { agent: "codex" }
+                      AgentBadge { agent: "claude" }
                     }
-                  }
 
-                  Text {
-                    anchors.right: parent.right
-                    anchors.top: parent.top
-                    anchors.margins: Style.spaceReal(9)
-                    text: "install one"
-                    textFormat: Text.PlainText
-                    color: root.inkFaint
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
+                    Text {
+                      anchors.horizontalCenter: parent.horizontalCenter
+                      text: "install one — whichever you already use"
+                      textFormat: Text.PlainText
+                      color: root.inkDim
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                    }
                   }
                 }
 
@@ -615,8 +623,12 @@ Item {
               height: deck.height
 
               Column {
-                anchors.fill: parent
-                anchors.rightMargin: Style.spaceReal(4)
+                anchors.left: parent.left
+                anchors.right: parent.right
+                // Centred rather than pinned to the top: the cards do not hold
+                // the same amount, and a short one left a third of the card
+                // empty below it, which reads as something missing.
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.spacing.panelGap
 
                 Heading {
@@ -687,8 +699,12 @@ Item {
               height: deck.height
 
               Column {
-                anchors.fill: parent
-                anchors.rightMargin: Style.spaceReal(4)
+                anchors.left: parent.left
+                anchors.right: parent.right
+                // Centred rather than pinned to the top: the cards do not hold
+                // the same amount, and a short one left a third of the card
+                // empty below it, which reads as something missing.
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.spacing.panelGap
 
                 Heading {
@@ -736,8 +752,12 @@ Item {
               height: deck.height
 
               Column {
-                anchors.fill: parent
-                anchors.rightMargin: Style.spaceReal(4)
+                anchors.left: parent.left
+                anchors.right: parent.right
+                // Centred rather than pinned to the top: the cards do not hold
+                // the same amount, and a short one left a third of the card
+                // empty below it, which reads as something missing.
+                anchors.verticalCenter: parent.verticalCenter
                 spacing: Style.spacing.panelGap
 
                 Heading {
@@ -779,7 +799,7 @@ Item {
                         // and a string makes that NaN — which lands on the dark
                         // branch and paints every state too dark to read here.
                         readonly property color hue: hues.colorFor(
-                          hueRow.modelData.state, Qt.rgba(0, 0, 0, 1), root.mark)
+                          hueRow.modelData.state, Color.menu.background, root.mark)
 
                         Rectangle {
                           width: Style.spaceReal(8)
@@ -825,10 +845,10 @@ Item {
 
         Item {
           id: foot
-          anchors.top: deck.bottom
-          anchors.topMargin: Style.spaceReal(22)
-          width: deck.width
-          height: Style.spaceReal(28)
+          anchors.bottom: parent.bottom
+          anchors.left: parent.left
+          anchors.right: parent.right
+          height: Style.spaceReal(30)
 
           Text {
             id: skip
@@ -901,22 +921,24 @@ Item {
             TapHandler { onTapped: root.next() }
           }
         }
-      }
 
-      // Dismiss in the corner, away from the reading. The scrim and Esc do the
-      // same thing; this is the one a person looks for first.
-      Text {
-        anchors.top: parent.top
-        anchors.right: parent.right
-        anchors.margins: Style.space(26)
-        text: "✕"
-        textFormat: Text.PlainText
-        color: closeHover.hovered ? root.ink : root.inkFaint
-        font.family: Style.font.family
-        font.pixelSize: Style.font.heading
+        // Dismiss in the card's own corner. The scrim and Esc do the same
+        // thing; this is the one a person looks for first. The headings stop
+        // short of it rather than running underneath.
+        Text {
+          id: closeMark
+          anchors.top: parent.top
+          anchors.right: parent.right
+          text: "✕"
+          textFormat: Text.PlainText
+          color: closeHover.hovered ? root.ink : root.inkFaint
+          font.family: Style.font.family
+          font.pixelSize: Style.font.subtitle
 
-        HoverHandler { id: closeHover }
-        TapHandler { onTapped: root.closed() }
+          HoverHandler { id: closeHover }
+          TapHandler { onTapped: root.closed() }
+        }
+        }
       }
     }
   }

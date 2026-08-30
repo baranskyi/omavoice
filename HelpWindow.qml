@@ -26,6 +26,7 @@ Item {
   property string workspace: ""
 
   signal closed()
+  signal tourRequested()
 
   onOpenChanged: if (open) Qt.callLater(function () { keyCatcher.forceActiveFocus() })
 
@@ -242,11 +243,36 @@ Item {
         // Head and foot are pinned, the middle scrolls. A window that grows
         // past the screen and pushes its own closing instruction off the
         // bottom is a trap, and this one has a lot to say.
+        // The tour is the picture version of this window, and this window is
+        // where somebody lands when they want it. Offering it only in settings
+        // put it behind a heading nobody opens looking for an explanation.
+        //
+        // A sibling of the head rather than a child of it: the head is a Row,
+        // and a Row positions its children itself — an anchored one fights it.
+        Button {
+          id: tourButton
+          anchors.right: parent.right
+          anchors.verticalCenter: head.verticalCenter
+          text: "Introduction…"
+          bordered: true
+          foreground: Color.menu.text
+          accent: Color.accent
+          fontFamily: Style.font.family
+          fontSize: Style.font.bodySmall
+          onClicked: root.tourRequested()
+        }
+
         Row {
           id: head
           anchors.top: parent.top
           anchors.left: parent.left
-          anchors.right: parent.right
+          // Stops at the button rather than at the edge, so a longer title in
+          // some other language runs out of room instead of running under it.
+          anchors.right: tourButton.left
+          anchors.rightMargin: Style.spaceReal(12)
+          // The button is the taller of the two; the scrolling body starts
+          // below both, or it would slide under it.
+          height: Math.max(head.implicitHeight, tourButton.height)
           spacing: Style.spaceReal(8)
 
           Item {

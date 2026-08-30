@@ -220,6 +220,10 @@ Item {
     backend: client.backend
     workspace: client.workspace
     onClosed: root.helpOpen = false
+    onTourRequested: {
+      root.helpOpen = false
+      root.tourOpen = true
+    }
   }
 
   OnboardingWindow {

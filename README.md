@@ -60,14 +60,15 @@ Everything here is external to the plugin and none of it is installed for you.
 | **A paid OpenAI API key** | the Realtime API bills per audio token | **a ChatGPT subscription does not work for this** — get one at [platform.openai.com/api-keys](https://platform.openai.com/api-keys) |
 | **`codex` or `claude` on your `PATH`** | this is the brain | `codex` runs on a ChatGPT subscription, `claude` on your Claude limits |
 | **PipeWire** with `pw-record` / `pw-play` | audio in and out | standard on Omarchy |
-| **Python 3.11+** | the daemon | `uv` is used if present, otherwise `python -m venv` |
+| **Python 3.11+** | the daemon | the virtualenv is built from your own `python3`; `uv`, if present, only installs the pinned package |
 
 The only package downloaded during setup is `websockets`, into a virtualenv
 under `~/.local/share/omavoice/`. Nothing is installed system wide and nothing
-asks for `sudo`. One caveat: if `uv` is present, `setup.sh` uses it to build
-the virtualenv against Python 3.13, and `uv` will fetch a standalone
-interpreter when the system has none — that download is outside the lockfile
-and outside `--require-hashes`.
+asks for `sudo`. The virtualenv is built with the `python3` already on your
+machine and never with a downloaded interpreter: setup exports
+`UV_PYTHON_DOWNLOADS=never` and stops with a message if `python3` is missing or
+older than 3.11. No executable code enters the environment except through the
+lockfile.
 
 It is installed from `daemon/requirements.lock`, where the version is pinned
 and every artifact is bound to a digest, with `--require-hashes` — which

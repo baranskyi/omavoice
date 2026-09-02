@@ -21,17 +21,32 @@ note() { printf '  %s\n' "$*"; }
 # --- 1. Python environment ---------------------------------------------------
 # It lives outside the plugin folder on purpose: Omarchy's validator rejects a
 # plugin containing symlinks, and every virtualenv has a few.
+#
+# It is built from an interpreter already on this machine, never a downloaded
+# one. This used to be `uv venv --python 3.13`, and on a machine without 3.13
+# that has uv fetch a standalone CPython: executable interpreter code arriving
+# outside the lockfile and outside --require-hashes, which is the one hole the
+# rest of this file exists to close. Telling uv never to download an
+# interpreter makes the refusal uv's own rule rather than a property of how we
+# happen to call it, and it covers the install step below as well.
+export UV_PYTHON_DOWNLOADS=never
+
 say "Python environment"
 if [[ -x "$VENV/bin/python" ]]; then
   note "already at $VENV"
 else
-  mkdir -p "$(dirname "$VENV")"
-  if command -v uv >/dev/null; then
-    uv venv "$VENV" --python 3.13 >/dev/null
-  else
-    python3 -m venv "$VENV"
+  PYTHON="$(command -v python3 || true)"
+  if [[ -z "$PYTHON" ]]; then
+    echo "no python3 on PATH — install Python 3.11 or newer, then run this again" >&2
+    exit 1
   fi
-  note "created $VENV"
+  if ! "$PYTHON" -c 'import sys; raise SystemExit(0 if sys.version_info >= (3, 11) else 1)'; then
+    echo "$PYTHON is $("$PYTHON" -V 2>&1) — omavoice needs Python 3.11 or newer" >&2
+    exit 1
+  fi
+  mkdir -p "$(dirname "$VENV")"
+  "$PYTHON" -m venv "$VENV"
+  note "created $VENV from $PYTHON ($("$PYTHON" -V 2>&1 | cut -d' ' -f2))"
 fi
 
 # Only what the lockfile names, and only if its digest matches. This used to

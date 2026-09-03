@@ -28,8 +28,13 @@ signal, while a missing one makes the assistant talk to itself.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import functools
 import logging
+import os
 import re
+import signal
+import stat
 from dataclasses import dataclass
 
 log = logging.getLogger(__name__)
@@ -78,16 +83,178 @@ def short_label(name: str, description: str) -> str:
     return label or name
 
 
+# --- running the system's audio tools -------------------------------------
+#
+# pactl, pw-record, pw-play and setpriv are distribution binaries and live where
+# the distribution puts them. They are deliberately not looked up on PATH. The
+# systemd unit captures the user's shell PATH at install time — it has to,
+# because codex and claude live in version-manager directories that a bare
+# systemd PATH does not have — and those directories stay writable by the user
+# for the life of the machine. Anything that lands in one of them earlier on
+# that PATH would be what the daemon runs with the microphone open. That
+# reasoning covers the agent CLIs and nothing else; the four tools below are
+# taken from the system directories or not run at all.
+#
+# On this machine (Arch, usr-merged) all four are in /usr/bin, shipped by
+# libpulse, pipewire-audio and util-linux. /bin, /sbin and /usr/sbin are
+# symlinks to it here and are listed for distributions where they are not.
+_TRUSTED_BIN_DIRS = ("/usr/bin", "/bin", "/usr/sbin", "/sbin")
+
+# How long a helper gets to notice SIGTERM before it is killed outright. These
+# are stateless readers of the PipeWire graph with nothing to flush; the two
+# seconds pw-record and pw-play are given exist so a Bluetooth transport can be
+# released cleanly, and pactl has no such obligation.
+_HELPER_GRACE = 0.5
+# After SIGKILL the only wait is the kernel's. The second is there so a wedged
+# uninterruptible sleep cannot hang the daemon along with it.
+_KILL_GRACE = 1.0
+
+# `pactl list sources` prints 23 KB for the eight devices on this machine, a
+# shade under 3 KB each; the short forms are under a kilobyte. A quarter of a
+# megabyte holds ninety devices, which is well past any real desk, and stops a
+# pactl that has started talking and does not intend to finish.
+_PACTL_MAX_BYTES = 256 * 1024
+# The slowest of these calls measured 7.2 ms. Three seconds is not a
+# performance budget; it is the point at which pactl is presumed wedged.
+_PACTL_TIMEOUT = 3.0
+
+
+class TrustedBinaryMissing(OSError):
+    """A tool is not present as an executable in any trusted directory.
+
+    An OSError because every caller here already treats "the helper will not
+    start" that way, and a tool that is missing and a tool that refuses to exec
+    deserve the same handling: say so, and do without.
+    """
+
+
+@functools.lru_cache(maxsize=None)
+def trusted_binary(name: str) -> str:
+    """The absolute path of a system tool, or refuse to run it at all.
+
+    Cached because the answer only changes when packages are installed, and a
+    daemon that is running through that wants restarting anyway.
+    """
+    for directory in _TRUSTED_BIN_DIRS:
+        candidate = os.path.join(directory, name)
+        try:
+            # Follows symlinks on purpose: pw-record and pw-play are both links
+            # to pw-cat, and it is the target that has to be a real program.
+            info = os.stat(candidate)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode) or not os.access(candidate, os.X_OK):
+            continue
+        # And the link may not lead out of these directories, which would hand
+        # the choice back to whoever can write wherever it points.
+        if os.path.dirname(os.path.realpath(candidate)) not in _TRUSTED_BIN_DIRS:
+            continue
+        return candidate
+    raise TrustedBinaryMissing(
+        f"{name} is not an executable in any of {', '.join(_TRUSTED_BIN_DIRS)} — "
+        "install it from the distribution; PATH is deliberately not consulted"
+    )
+
+
+def _signal_group(proc: asyncio.subprocess.Process, sig: int) -> None:
+    """Signal a helper and anything it started.
+
+    Every helper here is spawned with `start_new_session=True`, so it leads a
+    process group of its own and the group can be signalled whole — a helper
+    that forks does not get to leave the child behind. If for any reason it is
+    not a group leader, only the process itself is signalled: its group would
+    then be the daemon's own, and killing that is worse than a stray child.
+    """
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        if os.getpgid(proc.pid) == proc.pid:
+            os.killpg(proc.pid, sig)
+        else:
+            proc.send_signal(sig)
+
+
+async def terminate_and_reap(
+    proc: asyncio.subprocess.Process, grace: float = _HELPER_GRACE
+) -> int | None:
+    """End a helper and collect its exit status. Never leaves it running.
+
+    Returning while a `pw-record` still holds the microphone is the failure
+    that matters here — the light stays on and the next session opens a second
+    capture — but an abandoned `pactl` is the same bug in slower motion.
+    """
+    if proc.returncode is not None:
+        return proc.returncode
+    _signal_group(proc, signal.SIGTERM)
+    try:
+        return await asyncio.wait_for(proc.wait(), timeout=grace)
+    except asyncio.TimeoutError:
+        pass
+    _signal_group(proc, signal.SIGKILL)
+    try:
+        return await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE)
+    except asyncio.TimeoutError:
+        log.error("helper pid %d survived SIGKILL", proc.pid)
+        return proc.returncode
+
+
+async def read_capped(
+    stream: asyncio.StreamReader, limit: int, drain_rest: bool = False
+) -> tuple[bytes, int]:
+    """Read at most `limit` bytes. Returns what was kept and what was dropped.
+
+    `drain_rest` is the difference between the two kinds of producer here. A
+    one-shot query is finished with once the cap is hit and gets killed. A
+    long-lived one is not: stop reading its pipe and it blocks on the next
+    write, and for pw-record that stalls the microphone rather than the log, so
+    the overflow is read and thrown away instead of left to back up.
+    """
+    kept = bytearray()
+    dropped = 0
+    while True:
+        block = await stream.read(65536)
+        if not block:
+            break
+        room = limit - len(kept)
+        if room > 0:
+            kept += block[:room]
+        dropped += max(0, len(block) - max(0, room))
+        if len(kept) >= limit and not drain_rest:
+            break
+    return bytes(kept), dropped
+
+
 async def _pactl(*args: str) -> str:
     try:
         proc = await asyncio.create_subprocess_exec(
-            "pactl", *args,
+            trusted_binary("pactl"), *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
+            # Its own process group, so the cleanup below reaches whatever it
+            # may have started and not only pactl itself.
+            start_new_session=True,
         )
-        out, _ = await asyncio.wait_for(proc.communicate(), timeout=3)
-    except (FileNotFoundError, asyncio.TimeoutError, OSError):
+    except OSError as exc:
+        log.warning("pactl %s did not run: %s", " ".join(args), exc)
         return ""
+    assert proc.stdout is not None
+    try:
+        out, _ = await asyncio.wait_for(
+            read_capped(proc.stdout, _PACTL_MAX_BYTES), timeout=_PACTL_TIMEOUT
+        )
+        if len(out) >= _PACTL_MAX_BYTES:
+            log.warning(
+                "pactl %s went past %d bytes — discarding it", " ".join(args), _PACTL_MAX_BYTES
+            )
+            out = b""
+    except (asyncio.TimeoutError, OSError):
+        log.warning("pactl %s did not finish in %.0fs", " ".join(args), _PACTL_TIMEOUT)
+        out = b""
+    finally:
+        # Whatever happened above, pactl does not outlive this call. On timeout
+        # the old code simply returned and left it running.
+        await terminate_and_reap(proc)
+    # An answer that arrived in part is not an answer: half of `list sources`
+    # is a device list missing devices, and nothing downstream can tell that
+    # from a machine that genuinely has none. Callers already handle "".
     return out.decode(errors="replace").strip()
 
 

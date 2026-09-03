@@ -7,9 +7,15 @@ socket instead, so there is never a question of which copy is authoritative.
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import logging
 import os
+import stat
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger("omavoice.config")
 
 PACKAGE_DIR = Path(__file__).resolve().parent
 ANSWER_SCHEMA = PACKAGE_DIR.parent / "schemas" / "answer.json"
@@ -195,15 +201,47 @@ class Config:
         return int(self.sample_rate * self.chunk_ms / 1000) * self.channels * 2
 
 
-def env_file() -> Path:
-    """Where the API key lives: the daemon's own config, mode 600.
+# --- files that outlive the process ------------------------------------------
+#
+# A pathname is a claim about the world at the moment it is resolved, and
+# nothing keeps it true afterwards. The daemon runs on every login and rewrites
+# the key file whenever someone saves one from the settings window; between
+# deciding "the key is at ~/.config/omavoice/key" and truncating that name,
+# anything running as this user can have made it a symlink to something else.
+# So the directories are opened once, everything below works relative to those
+# descriptors, the last component is never followed, and what is found there
+# has to be a plain file of ours before a byte is read or written.
+#
+# The reads are bounded and the writes are all-or-nothing, for the same reason:
+# a file that grew is not a file worth reading whole, and a half-written
+# credential is worse than no credential at all.
 
-    Not the shell's config and not a project .env — the key must not be readable
-    by every process the user starts, and it must survive reinstalling the
-    plugin.
+# An OpenAI key is under two hundred characters; the longest project key seen
+# so far is 164. Four kilobytes is twenty times that and still one small read.
+KEY_MAX_BYTES = 4096
+# Settings only, a handful of KEY=VALUE lines. 64 KiB is far more than anything
+# setup.sh or a person editing by hand would ever put there.
+ENV_MAX_BYTES = 64 * 1024
+
+
+class UnsafePath(OSError):
+    """What is at that name is not the plain file of ours we expected."""
+
+
+def config_dir() -> Path:
+    """The daemon's own config directory, holding the key and the settings.
+
+    Not the shell's config and not a project .env — the key must not be
+    readable by every process the user starts, and it must survive reinstalling
+    the plugin.
     """
     base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    return Path(base) / "omavoice" / "env"
+    return Path(base) / "omavoice"
+
+
+def env_file() -> Path:
+    """Settings, which systemd does load into the daemon's environment."""
+    return config_dir() / "env"
 
 
 def key_file() -> Path:
@@ -212,14 +250,189 @@ def key_file() -> Path:
     Deliberately not the env file: systemd loads that one into the daemon's
     environment, which is exactly what must not happen to a key.
     """
-    base = os.environ.get("XDG_CONFIG_HOME") or (Path.home() / ".config")
-    return Path(base) / "omavoice" / "key"
+    return config_dir() / "key"
+
+
+_dir_fds: dict[str, int] = {}
+
+
+def _dir_fd(path: Path) -> int:
+    """Open a directory once and keep it for the life of the process.
+
+    Naming it is unavoidable exactly here, and only here. Every operation after
+    this one is relative to the descriptor, so the name can be moved or
+    replaced afterwards without any of it landing somewhere else.
+    """
+    cached = _dir_fds.get(str(path))
+    if cached is not None:
+        return cached
+    path.mkdir(parents=True, exist_ok=True)
+    # O_CLOEXEC because this daemon spawns codex and claude on every question,
+    # and a handle on the directory holding the key is not theirs to inherit.
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        if os.fstat(fd).st_uid != os.getuid():
+            raise UnsafePath(errno.EPERM, f"{path} belongs to another user")
+    except BaseException:
+        os.close(fd)
+        raise
+    _dir_fds[str(path)] = fd
+    return fd
+
+
+def config_dir_fd() -> int:
+    return _dir_fd(config_dir())
+
+
+def state_dir_fd() -> int:
+    return _dir_fd(_state_dir())
+
+
+def _checked_fd(dir_fd: int, name: str, *, flags: int, mode: int = 0o600) -> int:
+    """Open one name inside an already-held directory, refusing surprises.
+
+    O_NOFOLLOW covers the symlink; the fstat covers everything O_NOFOLLOW does
+    not, which is most of it. O_NONBLOCK is not an optimisation — without it,
+    opening a fifo planted at this name would simply hang until someone fed it.
+    """
+    fd = os.open(name, flags | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK, mode, dir_fd=dir_fd)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise UnsafePath(errno.EINVAL, f"{name} is not a regular file")
+        if st.st_uid != os.getuid():
+            raise UnsafePath(errno.EPERM, f"{name} belongs to uid {st.st_uid}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def read_private(dir_fd: int, name: str, limit: int) -> str | None:
+    """At most `limit` bytes of a plain file of ours, or None.
+
+    None for every way this can go wrong — absent, a symlink, a fifo, someone
+    else's, too big. A daemon that will not start because its settings file
+    looks odd is a worse outcome than one that starts and says so.
+    """
+    try:
+        fd = _checked_fd(dir_fd, name, flags=os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    except UnsafePath as exc:
+        log.warning("refusing to read %s: %s", name, exc.strerror)
+        return None
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            log.warning("refusing to read %s: it is a symlink", name)
+        else:
+            log.warning("could not read %s: %s", name, exc)
+        return None
+    # One byte past the ceiling, so "exactly at the limit" and "far beyond it"
+    # are told apart without trusting a size the file could have changed since.
+    with os.fdopen(fd, "rb") as handle:
+        blob = handle.read(limit + 1)
+    if len(blob) > limit:
+        log.warning("refusing to read %s: larger than %d bytes", name, limit)
+        return None
+    return blob.decode("utf-8", "replace")
+
+
+def _mode_for(dir_fd: int, name: str, mode: int) -> int:
+    """The mode the replacement should carry, and a look at what it replaces.
+
+    Never wider than asked for and never wider than what is there now, so a
+    rewrite cannot loosen a key file. Owner-read is the floor: a credential we
+    can no longer read back is a credential lost.
+    """
+    try:
+        st = os.lstat(name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return mode
+    if not stat.S_ISREG(st.st_mode):
+        raise UnsafePath(errno.EINVAL, f"{name} is not a regular file")
+    if st.st_uid != os.getuid():
+        raise UnsafePath(errno.EPERM, f"{name} belongs to uid {st.st_uid}")
+    return (stat.S_IMODE(st.st_mode) & mode) | 0o400
+
+
+def write_private(dir_fd: int, name: str, text: str, *, mode: int = 0o600) -> None:
+    """Put new contents there, or leave the old ones exactly as they were.
+
+    Written to a temporary file beside it and renamed over the top, because the
+    alternative — truncate, then write — has a window in which the file holds
+    neither the old value nor the new one. A power cut in that window used to
+    mean an empty key file and an assistant that had forgotten its credential.
+    """
+    mode = _mode_for(dir_fd, name, mode)
+    tmp = f".{name}.{os.getpid()}.{os.urandom(6).hex()}.tmp"
+    # O_EXCL, so this cannot be talked into writing through a name someone else
+    # put there first; 600 from the moment it exists rather than chmod'ed after.
+    fd = os.open(
+        tmp,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        mode,
+        dir_fd=dir_fd,
+    )
+    try:
+        handle = os.fdopen(fd, "w")
+    except BaseException:
+        os.close(fd)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+    try:
+        # Exact, whatever the umask happens to be.
+        os.fchmod(handle.fileno(), mode)
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+        handle.close()
+        os.replace(tmp, name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        handle.close()
+        with contextlib.suppress(OSError):
+            os.unlink(tmp, dir_fd=dir_fd)
+        raise
+    # The rename has to reach the disk too, or a crash can leave the directory
+    # still pointing at the old inode with the new one already unlinked.
+    with contextlib.suppress(OSError):
+        os.fsync(dir_fd)
+
+
+def open_append(path: str | Path):
+    """A plain file of ours, opened to append to, without following a symlink.
+
+    For the audio taps. They are not secrets, but they carry the microphone
+    verbatim, and the path comes from the environment — which means it can name
+    something already there.
+    """
+    path = Path(path)
+    dir_fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        fd = _checked_fd(
+            dir_fd,
+            path.name,
+            flags=os.O_WRONLY | os.O_APPEND | os.O_CREAT,
+            mode=0o600,
+        )
+    finally:
+        os.close(dir_fd)
+    return os.fdopen(fd, "ab", buffering=0)
+
+
+def _config_fd() -> int | None:
+    try:
+        return config_dir_fd()
+    except OSError as exc:
+        log.warning("cannot use %s: %s", config_dir(), exc)
+        return None
 
 
 def read_api_key() -> str:
     """The key, from its file, with the older locations still honoured.
 
-    Two of them, in order of how much they should be trusted:
+    Three of them, in order of how much they should be trusted:
       1. the key file, which nothing else reads;
       2. OPENAI_API_KEY in the environment, which is how it used to arrive and
          how someone running the daemon by hand may still pass it;
@@ -227,25 +440,25 @@ def read_api_key() -> str:
          existing installation keeps working without the key going through
          systemd into the environment.
     """
-    path = key_file()
-    try:
-        key = path.read_text().strip()
+    fd = _config_fd()
+    if fd is not None:
+        key = (read_private(fd, "key", KEY_MAX_BYTES) or "").strip()
         if key:
             return key
-    except OSError:
-        pass
 
     from_env = os.environ.get("OPENAI_API_KEY", "").strip()
     if from_env:
         return from_env
 
-    try:
-        for line in env_file().read_text().splitlines():
+    if fd is not None:
+        for line in (read_private(fd, "env", ENV_MAX_BYTES) or "").splitlines():
             line = line.strip()
             if line.startswith("OPENAI_API_KEY="):
                 return line.split("=", 1)[1].strip().strip("\'\"")
-    except OSError:
-        pass
+
+    # Said out loud, and with the location, because the alternative is a daemon
+    # that starts and then fails at connect time with something about a 401.
+    log.warning("no API key yet — save one from the settings window, or put it in %s", key_file())
     return ""
 
 
@@ -257,36 +470,29 @@ def save_api_key(key: str) -> None:
     environment. Leaving a copy there would mean the credential is protected
     only until someone reads /proc.
     """
-    path = key_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    # Written 600 from the start rather than chmod'ed after: for the moment
-    # between creating and tightening it, the key would be world-readable.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        handle.write(key + "\n")
-    os.chmod(path, 0o600)
-
-    _strip_key_from_env_file()
+    fd = config_dir_fd()
+    write_private(fd, "key", key + "\n", mode=0o600)
+    _strip_key_from_env_file(fd)
 
 
-def _strip_key_from_env_file() -> None:
+def _strip_key_from_env_file(dir_fd: int) -> None:
     """Remove any OPENAI_API_KEY line from the settings file."""
-    path = env_file()
-    try:
-        lines = path.read_text().splitlines()
-    except OSError:
+    text = read_private(dir_fd, "env", ENV_MAX_BYTES)
+    if text is None:
         return
+    lines = text.splitlines()
     kept = [line for line in lines if not line.strip().startswith("OPENAI_API_KEY=")]
     if len(kept) == len(lines):
         return
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        handle.write("\n".join(kept).rstrip("\n") + "\n")
-    os.chmod(path, 0o600)
+    write_private(dir_fd, "env", "\n".join(kept).rstrip("\n") + "\n", mode=0o600)
 
 
 def load() -> Config:
     cfg = Config()
-    cfg.state_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        # Opened here so the descriptor is held from startup, before anything
+        # has had a chance to move the directory out from under us.
+        state_dir_fd()
+    except OSError as exc:
+        log.warning("cannot use %s: %s — settings will not be remembered", cfg.state_dir, exc)
     return cfg

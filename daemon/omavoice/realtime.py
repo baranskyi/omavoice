@@ -32,6 +32,48 @@ log = logging.getLogger("omavoice.realtime")
 
 WS_URL = "wss://api.openai.com/v1/realtime"
 
+# The biggest thing the Realtime API sends is one audio delta: base64 of PCM16
+# at the session's rate. At 24 kHz that is 48 000 bytes of audio per second, and
+# base64 spends four characters on every three bytes, so a second of speech is
+# 64 000 characters. Eight seconds is the ceiling — deltas stream as the model
+# speaks and are a fraction of a second each, so this is a bound on what the
+# server could plausibly have meant to send, not a working size.
+MAX_AUDIO_DELTA_B64 = 8 * 64_000
+
+# One inbound frame, sized to hold that delta plus its JSON envelope and no
+# more. Everything else the API sends — transcripts, the session echo,
+# response.done, a function call's arguments — is kilobytes. websockets
+# compares this against the length in the frame header and raises PayloadTooBig
+# before reading the payload, so an oversized frame is refused rather than
+# allocated, and a fragmented message is charged against the same budget
+# fragment by fragment.
+MAX_FRAME_BYTES = 512 * 1024
+
+# How many frames may wait unread. The read loop hands each audio delta to the
+# speaker before taking the next, so some slack absorbs a brief stall; past this
+# mark websockets stops reading the socket and the stall reaches the server as
+# TCP backpressure. The depth is also what turns the frame ceiling into a memory
+# ceiling: the two multiplied, sixteen megabytes, is the most a remote producer
+# can make this process hold — against no bound at all when frames were
+# unlimited and 256 of them could queue.
+MAX_INBOUND_QUEUE = 32
+
+# The session declares exactly one tool, and the brain runs one agent at a time,
+# so a second concurrent ask_agent has nothing of its own to run on. Refusing it
+# here keeps the number of agent jobs this class can start at one, whatever the
+# model emits.
+MAX_ACTIVE_TOOL_CALLS = 1
+
+# A function call's arguments as they arrive, JSON text. The schema has a single
+# field holding a spoken question; 8 KiB is longer than any turn a person
+# speaks, and short of a blob worth parsing on trust.
+MAX_TOOL_ARGUMENTS = 8 * 1024
+
+# And the query taken out of it, which is what reaches the agent. The prompt
+# asks for one self-contained question carrying the context of earlier turns —
+# a sentence or two. Longer than this is not a question any more.
+MAX_QUERY_CHARS = 2000
+
 # Many languages mark the speaker's gender — Russian and Hebrew on past-tense
 # verbs, Arabic and Spanish on adjectives — and a female voice using masculine
 # forms is the first thing a native speaker notices. English speakers never see
@@ -222,11 +264,13 @@ class RealtimeSession:
         self._ws = await websockets.connect(
             url,
             additional_headers={"Authorization": f"Bearer {self.cfg.api_key}"},
-            max_size=None,
-            # Belt and braces around the read loop being briefly busy: a deeper
-            # inbound queue, and a pong window long enough to survive a stall
-            # rather than tearing the conversation down mid-sentence.
-            max_queue=256,
+            # A finite protocol budget. Both of these used to be set the other
+            # way — no frame limit at all, 256 of them queued — which put how
+            # much this process allocates entirely in the remote end's hands.
+            max_size=MAX_FRAME_BYTES,
+            max_queue=MAX_INBOUND_QUEUE,
+            # A pong window long enough to survive a busy read loop rather than
+            # tearing the conversation down mid-sentence.
             ping_interval=20,
             ping_timeout=60,
         )
@@ -305,9 +349,10 @@ class RealtimeSession:
                 await task
 
     async def close(self) -> None:
-        for task in self._tools.values():
-            task.cancel()
-        self._tools.clear()
+        # Awaited, not merely cancelled. A bare cancel() returns before the task
+        # has seen it, so the session closed with agent jobs still pending and
+        # still holding whatever the brain had started for them.
+        await self.cancel_tools()
         ws, self._ws = self._ws, None
         if ws:
             # close() waits for the server's half of the handshake, which a
@@ -373,6 +418,13 @@ class RealtimeSession:
             raise RuntimeError("run() before connect()")
         try:
             async for raw in ws:
+                # The transport already refused anything larger, at the frame
+                # header. Stating the ceiling again here is what keeps it true
+                # of the parsing path itself rather than of a keyword argument
+                # thirty lines away.
+                if len(raw) > MAX_FRAME_BYTES:
+                    log.warning("dropping an oversized frame (%d)", len(raw))
+                    continue
                 try:
                     event = json.loads(raw)
                 except json.JSONDecodeError:
@@ -401,8 +453,19 @@ class RealtimeSession:
         # Audio deltas are the hot path and are not worth logging.
         if kind in ("response.output_audio.delta", "response.audio.delta"):
             delta = event.get("delta")
-            if delta:
-                await self.on_audio(base64.b64decode(delta))
+            if not isinstance(delta, str) or not delta:
+                return
+            # Checked in the encoded form, so the decision is made before the
+            # three-quarters-as-large decoded copy exists.
+            if len(delta) > MAX_AUDIO_DELTA_B64:
+                log.warning("dropping an oversized audio delta (%d)", len(delta))
+                return
+            try:
+                pcm = base64.b64decode(delta)
+            except ValueError:
+                log.warning("undecodable audio delta")
+                return
+            await self.on_audio(pcm)
             return
 
         if kind in ("session.created", "session.updated"):
@@ -424,7 +487,7 @@ class RealtimeSession:
             self._response_active = False
 
         if kind == "response.function_call_arguments.done":
-            self._start_tool(event)
+            await self._start_tool(event)
             return
 
         if self.cfg.debug and kind != "response.output_audio_transcript.delta":
@@ -432,7 +495,27 @@ class RealtimeSession:
 
         await self.on_event(event)
 
-    def _start_tool(self, event: dict) -> None:
+    async def _answer_call(self, call_id: str, spoken: str, *, respond: bool) -> None:
+        """Hand one function call its result, and optionally ask to speak.
+
+        A refusal issued while another job is in flight sets respond=False:
+        that job sends its own response.create when it finishes, and two of
+        them for one turn make the model answer twice.
+        """
+        await self._send(
+            {
+                "type": "conversation.item.create",
+                "item": {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": json.dumps({"spoken": spoken}, ensure_ascii=False),
+                },
+            }
+        )
+        if respond:
+            await self._send({"type": "response.create"})
+
+    async def _start_tool(self, event: dict) -> None:
         """Run the tool without blocking the event loop.
 
         The agent can take tens of seconds. Blocking here would stop us reading
@@ -444,32 +527,62 @@ class RealtimeSession:
         if not call_id:
             return
 
+        if call_id in self._tools:
+            # The same call arriving twice. Nothing goes back on the wire: the
+            # task already holding this call_id will send the one
+            # function_call_output it is owed, and a second output for the same
+            # id is a protocol error. Overwriting the entry, which is what used
+            # to happen, left the first task running with nobody holding its
+            # handle — so cancelling the conversation never reached it.
+            log.warning("ignoring a repeat of tool call %s", call_id)
+            return
+
+        if len(self._tools) >= MAX_ACTIVE_TOOL_CALLS:
+            log.warning(
+                "refusing tool call %s — %d already running", call_id, len(self._tools)
+            )
+            await self._answer_call(
+                call_id,
+                "Still working on the previous question — ask again after it.",
+                respond=False,
+            )
+            return
+
+        raw_args = event.get("arguments") or "{}"
+        if not isinstance(raw_args, str) or len(raw_args) > MAX_TOOL_ARGUMENTS:
+            log.warning("refusing tool call %s — arguments of %d", call_id, len(raw_args))
+            await self._answer_call(
+                call_id,
+                "That question did not come through — ask again.",
+                respond=not self._tools,
+            )
+            return
         try:
-            args = json.loads(event.get("arguments") or "{}")
+            args = json.loads(raw_args)
         except json.JSONDecodeError:
             args = {}
         query = str(args.get("query") or "").strip()
+        if len(query) > MAX_QUERY_CHARS:
+            log.warning("truncating a %d character query", len(query))
+            query = query[:MAX_QUERY_CHARS]
 
         async def _run() -> None:
             try:
-                result = await self.on_tool_call(name, query)
-            except asyncio.CancelledError:
-                return
-            except Exception as exc:  # noqa: BLE001
-                log.exception("tool %s failed", name)
-                result = f"The agent failed: {exc}"
-
-            await self._send(
-                {
-                    "type": "conversation.item.create",
-                    "item": {
-                        "type": "function_call_output",
-                        "call_id": call_id,
-                        "output": json.dumps({"spoken": result}, ensure_ascii=False),
-                    },
-                }
-            )
-            await self._send({"type": "response.create"})
-            self._tools.pop(call_id, None)
+                try:
+                    result = await self.on_tool_call(name, query)
+                except Exception as exc:  # noqa: BLE001
+                    log.exception("tool %s failed", name)
+                    result = f"The agent failed: {exc}"
+                # Cancellation is a BaseException and passes straight through
+                # here, which is the point: a cancelled question must not send
+                # its answer, because once it is on the wire the model speaks.
+                await self._answer_call(call_id, result, respond=True)
+            finally:
+                # However this ended — answered, failed or cancelled — the slot
+                # goes back, or the cap would leak one call at a time. Only if
+                # it is still ours: cancel_tools() empties the dict from under
+                # us, and a later call may have reused the id by then.
+                if self._tools.get(call_id) is asyncio.current_task():
+                    del self._tools[call_id]
 
         self._tools[call_id] = asyncio.create_task(_run(), name=f"tool-{call_id}")

@@ -66,10 +66,30 @@ _SPEAKING_GATE_MULTIPLIER = 2.6
 # a beat after the assistant said "Чем могу помочь?".
 _ECHO_TAIL_SECONDS = 0.9
 
+# The preferences file holds two short names, a folder, three lists of at most
+# two words each and a flag — a few hundred bytes, and the largest one this
+# program has ever written was under four hundred. 64 KiB leaves room for a
+# very long workspace path and still refuses anything that has been grown into
+# something we would rather not read whole.
+_MAX_PREFS_BYTES = 64 * 1024
+_PREFS_NAME = "preferences.json"
+
 
 def _open_dump(path: str):
-    """Open one of the audio taps, or None when it is not asked for."""
-    return open(path, "ab", buffering=0) if path else None
+    """Open one of the audio taps, or None when it is not asked for.
+
+    Not a plain open: these carry the microphone verbatim, and the path comes
+    from the environment, so it can name something that is already there. The
+    same rule as everywhere else — the last component is not followed, and what
+    is at it has to be a plain file of ours.
+    """
+    if not path:
+        return None
+    try:
+        return config.open_append(path)
+    except OSError as exc:
+        log.warning("audio tap %s not opened: %s", path, exc)
+        return None
 
 
 def _log_task_failure(task: asyncio.Task) -> None:
@@ -160,7 +180,9 @@ class Daemon:
         # the person, like the folder and the grants, and it should survive a
         # plugin being removed and put back.
         self.onboarded = False
-        self._prefs_path = cfg.state_dir / "preferences.json"
+        # Kept for saying where it is; nothing opens it by this name. The reads
+        # and writes go through the state directory's descriptor instead.
+        self._prefs_path = cfg.state_dir / _PREFS_NAME
         self._load_preferences()
 
         self.state = "idle"
@@ -176,42 +198,68 @@ class Daemon:
 
     # -- preferences ----------------------------------------------------------
 
+    def _state_fd(self) -> int | None:
+        """The state directory, held open since startup. None if it is not usable."""
+        try:
+            return config.state_dir_fd()
+        except OSError as exc:
+            log.warning("cannot use %s: %s", self.cfg.state_dir, exc)
+            return None
+
     def _save_preferences(self) -> None:
         """Remember voice and backend across restarts.
 
         Kept next to the daemon's own state rather than in shell.json: these
         are the daemon's settings, and writing to the shell's config from here
         would race with the bar rewriting it.
+
+        Written whole and renamed into place. Several of these fields are
+        permissions, and a permission read back from a file that was truncated
+        and then not finished is a permission nobody granted.
         """
+        fd = self._state_fd()
+        if fd is None:
+            return
+        blob = json.dumps(
+            {
+                "voice": self.cfg.voice,
+                "backend": self.brain.backend,
+                # "" means follow the system; see devices.resolve.
+                "input": self.cfg.input_target,
+                # The folder the agent works in, and which backends
+                # have been allowed to answer at all. Both are answers
+                # to a question the person was asked in plain words,
+                # which is why they are stored as given rather than
+                # derived from anything: nothing else in this program
+                # is entitled to infer them.
+                "workspace": str(self.cfg.brain_cwd or ""),
+                "consented": sorted(self.cfg.consented),
+                "unrestricted": sorted(self.cfg.unrestricted),
+                "onboarded": bool(self.onboarded),
+            },
+            indent=2,
+        )
         try:
-            self._prefs_path.write_text(
-                json.dumps(
-                    {
-                        "voice": self.cfg.voice,
-                        "backend": self.brain.backend,
-                        # "" means follow the system; see devices.resolve.
-                        "input": self.cfg.input_target,
-                        # The folder the agent works in, and which backends
-                        # have been allowed to answer at all. Both are answers
-                        # to a question the person was asked in plain words,
-                        # which is why they are stored as given rather than
-                        # derived from anything: nothing else in this program
-                        # is entitled to infer them.
-                        "workspace": str(self.cfg.brain_cwd or ""),
-                        "consented": sorted(self.cfg.consented),
-                        "unrestricted": sorted(self.cfg.unrestricted),
-                        "onboarded": bool(self.onboarded),
-                    },
-                    indent=2,
-                )
-            )
+            config.write_private(fd, _PREFS_NAME, blob + "\n")
         except OSError as exc:
             log.warning("could not save preferences: %s", exc)
 
     def _load_preferences(self) -> None:
+        fd = self._state_fd()
+        if fd is None:
+            return
+        raw = config.read_private(fd, _PREFS_NAME, _MAX_PREFS_BYTES)
+        if raw is None:
+            return
         try:
-            data = json.loads(self._prefs_path.read_text())
-        except (OSError, json.JSONDecodeError):
+            data = json.loads(raw)
+        except json.JSONDecodeError:
+            log.warning("%s is not valid JSON — starting from defaults", self._prefs_path)
+            return
+        # A JSON document is not necessarily an object, and everything below
+        # asks this one for keys.
+        if not isinstance(data, dict):
+            log.warning("%s is not a JSON object — starting from defaults", self._prefs_path)
             return
         voice = str(data.get("voice") or "")
         if voice in config.VOICE_GENDER:
@@ -907,6 +955,12 @@ class Daemon:
             await self.speaker.flush_now()
         if session:
             await session.close()
+        # close() cancels and awaits the tool tasks, which is what ends the
+        # agent through their own cancellation. Asking the brain directly as
+        # well costs one signal to a group that is already gone, and covers the
+        # case where a question was never tracked as a task in the first place.
+        with contextlib.suppress(Exception):
+            await self.brain.cancel()
         if task and task is not asyncio.current_task():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

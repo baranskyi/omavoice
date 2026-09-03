@@ -26,6 +26,7 @@ import logging
 import os
 import re
 import shutil
+import signal
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -182,32 +183,155 @@ def _coerce(raw: str) -> Answer:
     return Answer(spoken=spoken, markdown=markdown, links=links, files=files)
 
 
-async def _reap(proc: asyncio.subprocess.Process) -> None:
-    """Terminate, wait, and kill if it will not go.
+# How long the agent's process group gets between the signal it may refuse and
+# the one it may not, and how often we look to see whether it has gone.
+_TERM_GRACE = 3.0
+_KILL_GRACE = 2.0
+_GROUP_POLL = 0.05
 
-    Asking politely and walking away is not stopping a process: an agent that
-    ignores SIGTERM keeps running, and the caller has already forgotten about
-    it. Nothing here raises — this runs on paths that are themselves cleaning
-    up after a failure.
+
+@dataclass
+class _Job:
+    """One invocation: the process we started, and how to name its group.
+
+    A process group is named by the pid of its leader, which `start_new_session`
+    makes our child before it execs. `born` is when that pid started, kept
+    because pids are reused: it is what tells our group apart from one that
+    merely inherited the number afterwards.
     """
+
+    proc: asyncio.subprocess.Process
+    born: str
+
+
+def _proc_fields(pid: int) -> list[str] | None:
+    """/proc/<pid>/stat past the command name, or None if there is no such pid.
+
+    The name is the second field, parenthesised, and a program is free to put
+    spaces and brackets in it — so the split starts after the last ")". What is
+    wanted from the rest is the state (first) and the process group (third).
+    """
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read().decode(errors="replace")
+    except OSError:
+        return None
+    cut = raw.rfind(") ")
+    if cut < 0:
+        return None
+    return raw[cut + 2:].split()
+
+
+def _born(pid: int) -> str:
+    """When this pid started, in ticks since boot. "" if it cannot be read."""
+    fields = _proc_fields(pid)
+    if fields is None or len(fields) <= 19:
+        return ""
+    return fields[19]
+
+
+def _group_is_ours(pgid: int, born: str) -> bool:
+    """Whether signalling this group can still only reach the agent we started.
+
+    The group is named after a pid, and Linux hands pids out again. While the
+    process we started is unreaped the number cannot be taken by anyone else,
+    but once the kernel has collected it the name could in principle belong to
+    a stranger — so it is checked rather than assumed. Two things have to be
+    true for a signal to go astray: something else holds the pid, and it made
+    itself the leader of a group with it. Anything else with that pid sits in
+    some other group, where a signal addressed to this one does not reach it.
+    """
+    fields = _proc_fields(pgid)
+    if fields is None or len(fields) <= 19:
+        # Nothing holds the pid. What is left in the group is our agent's
+        # orphaned descendants, which is the case this exists for.
+        return True
+    if fields[2] != str(pgid):
+        return True
+    return not born or fields[19] == born
+
+
+def _group_alive(pgid: int) -> bool:
+    """Whether anything in the group is still running.
+
+    Not `proc.wait()`, which answers a different question: it says when the
+    process we started exited and is silent about the children it left, and
+    those are the ones that keep reading files and being billed. A process we
+    have not collected yet is a zombie — it holds its pid and runs nothing, so
+    it does not count as alive here.
+    """
+    want = str(pgid)
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return False
+    for name in entries:
+        if not name.isdigit():
+            continue
+        fields = _proc_fields(int(name))
+        if fields and len(fields) > 2 and fields[2] == want and fields[0] != "Z":
+            return True
+    return False
+
+
+def _signal_group(pgid: int, born: str, sig: int) -> None:
+    """Signal the whole group, or nothing at all if the name is no longer ours."""
+    if not _group_is_ours(pgid, born):
+        log.debug("pid %d has been reused — not signalling that group", pgid)
+        return
+    with contextlib.suppress(OSError):
+        os.killpg(pgid, sig)
+
+
+async def _await_group_exit(pgid: int, grace: float) -> None:
+    """Give the group `grace` seconds to empty, and look rather than hope."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + grace
+    while _group_alive(pgid):
+        if loop.time() >= deadline:
+            return
+        await asyncio.sleep(_GROUP_POLL)
+
+
+async def _collect(proc: asyncio.subprocess.Process) -> None:
+    """Wait for the process we started, so nothing is left unreaped."""
     if proc.returncode is not None:
         return
-    with contextlib.suppress(ProcessLookupError):
-        proc.terminate()
-    try:
-        await asyncio.wait_for(proc.wait(), timeout=3)
-        return
-    except asyncio.TimeoutError:
-        log.warning("agent ignored terminate, killing it")
-    except asyncio.CancelledError:
-        # Even while being cancelled, the child must not outlive us.
-        with contextlib.suppress(ProcessLookupError):
-            proc.kill()
-        raise
-    with contextlib.suppress(ProcessLookupError):
-        proc.kill()
     with contextlib.suppress(asyncio.TimeoutError, asyncio.CancelledError):
-        await asyncio.wait_for(proc.wait(), timeout=2)
+        await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE)
+
+
+async def _reap(job: _Job) -> None:
+    """End the agent and everything it started, then collect what is left.
+
+    Terminating the process we launched is not stopping the work. `codex` and
+    `claude` do their work in children of their own — shells, MCP servers, a
+    search — and those are not our children: killing the middle of that tree
+    leaves the bottom of it reading the filesystem, holding sockets and, for a
+    hosted model, still being paid for. So every invocation gets its own
+    session and what is signalled here is the group, not the handle.
+
+    Nothing raises except cancellation, which is re-raised only after the group
+    has been dealt with — this runs on paths that are themselves cleaning up.
+    """
+    proc, pgid = job.proc, job.proc.pid
+    _signal_group(pgid, job.born, signal.SIGTERM)
+    try:
+        await _await_group_exit(pgid, _TERM_GRACE)
+    except asyncio.CancelledError:
+        # Being cancelled is not a reason to leave an agent running, and
+        # sending a signal does not block, so the group still goes.
+        _signal_group(pgid, job.born, signal.SIGKILL)
+        await _collect(proc)
+        raise
+    if _group_alive(pgid):
+        log.warning("agent group %d ignored terminate — killing it", pgid)
+        _signal_group(pgid, job.born, signal.SIGKILL)
+        with contextlib.suppress(asyncio.CancelledError):
+            await _await_group_exit(pgid, _KILL_GRACE)
+        if _group_alive(pgid):
+            log.error("agent group %d survived kill", pgid)
+    await _collect(proc)
 
 
 # The name of the permission profile we hand codex. Ours, built fresh on
@@ -298,7 +422,11 @@ class Brain:
         # One thread per backend, so flipping the switch mid-conversation does
         # not try to resume a codex thread inside claude.
         self._threads: dict[str, str] = {}
-        self._proc: asyncio.subprocess.Process | None = None
+        self._job: _Job | None = None
+        # One agent at a time. The lock is what makes `_job` mean anything:
+        # with two invocations in flight it named only the later one, and
+        # cancelling stopped that one.
+        self._lock = asyncio.Lock()
         self._on_trace: "Callable[[str], None] | None" = None
 
     # -- lifecycle ----------------------------------------------------------
@@ -404,13 +532,19 @@ class Brain:
         return ""
 
     async def cancel(self) -> None:
-        proc = self._proc
-        if proc is not None:
-            await _reap(proc)
+        """Stop the agent from outside the task that asked the question.
+
+        Barge-in and "stop" come through here while `_run` is still waiting.
+        It does not clear `_job`: the asking task owns that, and will reap
+        again on its way out — which by then costs one signal to a dead group.
+        """
+        job = self._job
+        if job is not None:
+            await _reap(job)
 
     @property
     def busy(self) -> bool:
-        return self._proc is not None and self._proc.returncode is None
+        return self._lock.locked()
 
     # -- the one public call ------------------------------------------------
 
@@ -430,22 +564,40 @@ class Brain:
             log.info("not asking %s: %s", self.backend, denial)
             return Answer.error(denial)
 
-        try:
-            if self.backend == "codex":
-                return await self._ask_codex(query)
-            return await self._ask_claude(query)
-        except asyncio.TimeoutError:
-            await self.cancel()
-            return Answer.error("The agent is taking too long. Try a shorter question.")
-        except Exception as exc:  # noqa: BLE001 - a dead brain must not kill the voice
-            log.exception("brain failed")
-            return Answer.error(f"The agent failed: {exc}")
+        # One question at a time, and said out loud rather than raced.
+        #
+        # Two can arrive at once — the model calls the tool twice, or a typed
+        # question lands while a spoken one is still being worked on — and this
+        # used to start a second agent on top of the first. Only the later of
+        # the two was tracked, so cancelling reached that one and the other kept
+        # reading the machine, unwatched and still billed. Queueing would be
+        # worse than refusing: by the time a stale question got its turn nobody
+        # is waiting for the answer, and it would still have to be paid for.
+        #
+        # The test and the acquire are one step. Taking an uncontended asyncio
+        # lock does not suspend, so no third caller can run between them.
+        if self._lock.locked():
+            log.info("refusing a second question while the agent is working")
+            return Answer.error("I am still working on the last question. "
+                                "Ask me again when I have answered that one.")
+        async with self._lock:
+            try:
+                if self.backend == "codex":
+                    return await self._ask_codex(query)
+                return await self._ask_claude(query)
+            except asyncio.TimeoutError:
+                # `_run` has already ended the group by the time this is
+                # reached; this is the sentence, not the cleanup.
+                return Answer.error("The agent is taking too long. Try a shorter question.")
+            except Exception as exc:  # noqa: BLE001 - a dead brain must not kill the voice
+                log.exception("brain failed")
+                return Answer.error(f"The agent failed: {exc}")
 
     # -- backends -----------------------------------------------------------
 
     async def _drain(
         self,
-        proc: asyncio.subprocess.Process,
+        job: _Job,
         stream: asyncio.StreamReader,
         limit: int,
         what: str,
@@ -485,7 +637,7 @@ class Brain:
                     del pending[: cut + 1]
                     self._offer(on_line, line)
         log.warning("agent wrote more than %d bytes to %s — stopping it", limit, what)
-        await _reap(proc)
+        await _reap(job)
         return bytes(buf)
 
     @staticmethod
@@ -505,7 +657,7 @@ class Brain:
 
     async def _gather(
         self,
-        proc: asyncio.subprocess.Process,
+        job: _Job,
         stdin: bytes | None,
         on_line: "Callable[[str], None] | None" = None,
     ) -> tuple[bytes, bytes]:
@@ -515,6 +667,7 @@ class Brain:
         are reading stdout deadlocks otherwise — and whichever one trips its
         limit ends the process, which gives the other one its EOF.
         """
+        proc = job.proc
         if proc.stdin is not None:
             with contextlib.suppress(BrokenPipeError, ConnectionResetError, OSError):
                 if stdin:
@@ -523,8 +676,8 @@ class Brain:
                 proc.stdin.close()
         assert proc.stdout is not None and proc.stderr is not None
         out, err = await asyncio.gather(
-            self._drain(proc, proc.stdout, _MAX_STDOUT, "stdout", on_line),
-            self._drain(proc, proc.stderr, _MAX_STDERR, "stderr"),
+            self._drain(job, proc.stdout, _MAX_STDOUT, "stdout", on_line),
+            self._drain(job, proc.stderr, _MAX_STDERR, "stderr"),
         )
         await proc.wait()
         return out, err
@@ -546,23 +699,32 @@ class Brain:
             # working directory nobody chose; leaving that in place would make
             # the scope an accident of how the service happened to be launched.
             cwd=str(self.cfg.brain_cwd) if self.cfg.brain_cwd else None,
+            # Its own session, so that what can be stopped is the whole tree
+            # and not just the top of it. Established from this side of the
+            # fork on purpose: a child asked to call `setsid` for itself might
+            # die before it does, and then we would be signalling a group that
+            # never existed. Between the fork and the exec it is not the
+            # child's decision to make, so by the time this returns the pid is
+            # already the name of a group and nothing else is in it.
+            start_new_session=True,
         )
-        self._proc = proc
+        job = _Job(proc, _born(proc.pid))
+        self._job = job
         try:
             out, err = await asyncio.wait_for(
-                self._gather(proc, stdin, on_line), timeout=self.cfg.brain_timeout
+                self._gather(job, stdin, on_line), timeout=self.cfg.brain_timeout
             )
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            # Both paths used to leave the agent running. `communicate()` being
-            # cancelled does not touch the child, and the old `finally` dropped
-            # the handle before anything had a chance to kill it — so a timed
-            # out or interrupted question left a codex or claude process behind,
-            # untracked, still reading the filesystem and still being billed.
-            await _reap(proc)
-            raise
         finally:
-            if self._proc is proc:
-                self._proc = None
+            # Every exit path, not only the unhappy ones: the answer came back,
+            # the clock ran out, the question was cancelled, something raised.
+            # An agent that finished can still have left children behind, and
+            # this is the only place that knows they exist. Cancellation gets
+            # here too — `wait_for` cancels the gather, which does not touch
+            # the process, and dropping the handle first is how a timed-out
+            # question used to leave a codex still reading the filesystem.
+            await _reap(job)
+            if self._job is job:
+                self._job = None
         return proc.returncode or 0, out.decode(errors="replace"), err.decode(errors="replace")
 
     async def _ask_codex(self, query: str) -> Answer:

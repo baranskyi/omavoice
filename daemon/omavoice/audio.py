@@ -23,13 +23,34 @@ import math
 from collections.abc import Awaitable, Callable
 
 from .config import Config
+# Process plumbing, not device policy — `verify_target` below still keeps this
+# file out of the business of enumerating devices. It lives in devices.py
+# because that module imports nothing else of ours, so both can share it
+# without a cycle.
+from .devices import read_capped, terminate_and_reap, trusted_binary
 
 log = logging.getLogger("omavoice.audio")
+
 
 # Kill children with the daemon, however the daemon dies. This is Omarchy's own
 # pattern for shell-spawned processes (see plugins/clipboard/Clipboard.qml) and
 # it is what keeps a crashed daemon from leaving a hot microphone behind.
-_PDEATHSIG = ["setpriv", "--pdeathsig", "TERM"]
+#
+# Both halves are absolute paths from trusted directories. setpriv execs what
+# it is given, and it does so through PATH — so binding setpriv and leaving
+# `pw-record` a bare name would move the hole one argument to the right rather
+# than closing it.
+def _pdeathsig_argv(tool: str) -> list[str]:
+    return [trusted_binary("setpriv"), "--pdeathsig", "TERM", trusted_binary(tool)]
+
+
+# What pw-record and pw-play have to say for themselves fits in a couple of
+# kilobytes: the longest single message either produces is the usage text it
+# prints when an option is wrong, 2,199 bytes. Eight holds that plus a handful
+# of repeated warnings, which is all anyone reads before the log truncates it
+# to 300 characters anyway. What it stops is the other case — a stream that
+# complains once per buffer for the length of a conversation.
+_STDERR_MAX_BYTES = 8 * 1024
 
 # Roughly the RMS of comfortable speech in 16-bit samples. Dividing by it maps
 # normal talking to most of the meter without clipping on a loud laugh.
@@ -408,6 +429,11 @@ class Microphone:
     # three seconds of a person talking to something that cannot hear.
     MAX_RETRIES = 8
     COLD_RETRIES = 2
+    # How long pw-record gets to exit on SIGTERM before it is killed. Releasing
+    # a Bluetooth HFP transport is not instant, and yanking it mid-release is
+    # what leaves a card wedged between profiles; two seconds is what stop() has
+    # always allowed, now applied everywhere the process is ended.
+    STOP_GRACE = 2.0
 
     def __init__(self, cfg: Config, on_chunk: Callable[[bytes, float, list[float]], None]) -> None:
         self.cfg = cfg
@@ -416,6 +442,9 @@ class Microphone:
         self.target = cfg.input_target
         self._proc: asyncio.subprocess.Process | None = None
         self._task: asyncio.Task | None = None
+        # Held rather than fired and forgotten: an unreferenced task can be
+        # collected mid-read, and this one owns the process's stderr pipe.
+        self._stderr_task: asyncio.Task | None = None
         self._bands = BandAnalyser(cfg.sample_rate)
         self.muted = False
         self._stopping = False
@@ -494,12 +523,12 @@ class Microphone:
                 self._deaf.add(self.target)
                 self.target = ""
 
-        argv = [*_PDEATHSIG, "pw-record", *_pw_common(self.cfg)]
-        if self.target:
-            argv += ["--target", self.target]
-        argv.append("-")
-        log.debug("mic: %s", " ".join(argv))
         try:
+            argv = [*_pdeathsig_argv("pw-record"), *_pw_common(self.cfg)]
+            if self.target:
+                argv += ["--target", self.target]
+            argv.append("-")
+            log.debug("mic: %s", " ".join(argv))
             proc = await asyncio.create_subprocess_exec(
                 *argv,
                 stdout=asyncio.subprocess.PIPE,
@@ -508,23 +537,59 @@ class Microphone:
                 # microphone produced nothing" stayed a mystery through several
                 # rounds of guessing.
                 stderr=asyncio.subprocess.PIPE,
+                # Its own process group, so stopping the session reaches the
+                # whole of what was started and not just the first process.
+                start_new_session=True,
             )
         except OSError as exc:
+            # Covers a missing or untrusted setpriv/pw-record as well as a
+            # refused exec; both leave the session deaf, which is worth saying
+            # on screen and not only in the log.
             log.error("could not start pw-record: %s", exc)
+            self._fault("pw-record could not be started — see the log")
             return None
-        asyncio.create_task(self._drain_stderr(proc), name="mic-stderr")
+        self._stderr_task = asyncio.create_task(self._drain_stderr(proc), name="mic-stderr")
         return proc
 
     async def _drain_stderr(self, proc: asyncio.subprocess.Process) -> None:
+        """Log what pw-record complains about, without storing all of it.
+
+        Read to EOF, this was a buffer a subprocess could grow at will for as
+        long as a conversation lasts. It is capped now — but the reading does
+        not stop at the cap, because a full pipe blocks pw-record on its next
+        write, and pw-record blocked on stderr is a microphone that has stopped
+        delivering audio. Past the cap the rest is read and dropped.
+        """
         if proc.stderr is None:
             return
         try:
-            data = await proc.stderr.read()
+            data, dropped = await read_capped(
+                proc.stderr, _STDERR_MAX_BYTES, drain_rest=True
+            )
         except (asyncio.CancelledError, ValueError):
             return
         text = data.decode(errors="replace").strip()
         if text:
             log.warning("pw-record said: %s", text[:300])
+        if dropped:
+            log.warning("pw-record wrote %d more bytes to stderr, dropped", dropped)
+
+    async def _stop_stderr(self) -> None:
+        """Let the drain finish on a pipe that is already at EOF, then stop it."""
+        task, self._stderr_task = self._stderr_task, None
+        if task is None:
+            return
+        try:
+            # The process is gone by the time this is called, so the read is
+            # returning already; the deadline is only here so a wedged pipe
+            # cannot hold the retry loop.
+            await asyncio.wait_for(asyncio.shield(task), timeout=0.5)
+        except asyncio.TimeoutError:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        except Exception:  # noqa: BLE001
+            log.exception("mic stderr drain failed")
 
     async def _run(self) -> None:
         try:
@@ -542,6 +607,12 @@ class Microphone:
                 return
             self._proc = proc
             delivered = await self._read(proc)
+            # Before anything else, and on every path out of _read: a pw-record
+            # that ended the pump is not necessarily a pw-record that has let
+            # go of the microphone. Reaping here also means the exit code
+            # logged below is the real one rather than None.
+            await terminate_and_reap(proc, grace=self.STOP_GRACE)
+            await self._stop_stderr()
             self.chunks += delivered
 
             if self._stopping:
@@ -640,6 +711,9 @@ class Microphone:
                 self.START_TIMEOUT if delivered == 0 else self.SILENCE_TIMEOUT,
                 delivered,
             )
+            # A stalled capture has nothing to flush, so it goes at once rather
+            # than through the graceful window. The reaping is _loop's, which
+            # does it on every path out of here.
             if proc.returncode is None:
                 proc.kill()
             return delivered
@@ -659,16 +733,28 @@ class Microphone:
                 await self._task
             self._task = None
         proc, self._proc = self._proc, None
-        if proc and proc.returncode is None:
-            proc.terminate()
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2)
-            except asyncio.TimeoutError:
-                proc.kill()
+        if proc:
+            # The old code killed on timeout and returned without waiting, so
+            # the one case that mattered — a pw-record ignoring SIGTERM with
+            # the microphone open — was also the one it did not confirm.
+            await terminate_and_reap(proc, grace=self.STOP_GRACE)
+        await self._stop_stderr()
 
 
 class Speaker:
     """Writes PCM to pw-play, and can drop everything still queued."""
+
+    # Same bargain as the microphone's: long enough for pw-play to let go of
+    # the sink on SIGTERM, short enough that shutting down is not a hang.
+    STOP_GRACE = 2.0
+    # A write that never returns is an answer that stops mid-sentence with
+    # nothing in the log, so the wait for pw-play to take the audio is bounded
+    # too. Normal backpressure is not: the model streams faster than real time,
+    # so the transport fills, and its 64 KiB high-water mark is 1.4 seconds of
+    # 24 kHz mono PCM16 — a drain returns as soon as pw-play has taken part of
+    # that. Ten seconds is seven times the whole buffer. It is not a pace, it
+    # is a verdict that the sink has stopped consuming.
+    WRITE_TIMEOUT = 10.0
 
     def __init__(
         self, cfg: Config, on_level: Callable[[float, list[float]], None] | None = None
@@ -696,13 +782,18 @@ class Speaker:
         return max(0.0, self._play_until - asyncio.get_running_loop().time())
 
     async def _spawn(self) -> asyncio.subprocess.Process:
-        argv = [*_PDEATHSIG, "pw-play", *_pw_common(self.cfg)]
+        # A missing or untrusted setpriv/pw-play raises OSError from here, which
+        # is what callers of a subprocess spawn already expect.
+        argv = [*_pdeathsig_argv("pw-play"), *_pw_common(self.cfg)]
         if self.target:
             argv += ["--target", self.target]
         argv.append("-")
         log.debug("speaker: %s", " ".join(argv))
         return await asyncio.create_subprocess_exec(
-            *argv, stdin=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL
+            *argv,
+            stdin=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            start_new_session=True,
         )
 
     async def start(self) -> None:
@@ -720,11 +811,22 @@ class Speaker:
             assert stdin
             try:
                 stdin.write(pcm)
-                await stdin.drain()
+                await asyncio.wait_for(stdin.drain(), timeout=self.WRITE_TIMEOUT)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "speaker took no audio for %.0fs — replacing it", self.WRITE_TIMEOUT
+                )
+                dead, self._proc = self._proc, None
+                await terminate_and_reap(dead, grace=self.STOP_GRACE)
+                return
             except (BrokenPipeError, ConnectionResetError):
                 # pw-play went away (device switch, suspend). Next write respawns it.
                 log.warning("speaker pipe broke, will respawn")
-                self._proc = None
+                dead, self._proc = self._proc, None
+                # Gone as a writer is not the same as gone as a process. This
+                # used to be dropped on the floor, one abandoned player per
+                # device switch, each still attached to a sink.
+                await terminate_and_reap(dead, grace=self.STOP_GRACE)
                 return
 
             now = asyncio.get_running_loop().time()
@@ -744,6 +846,13 @@ class Speaker:
             self._play_until = 0.0
             if proc and proc.returncode is None:
                 proc.kill()
+        if proc:
+            # Killed inside the lock so barge-in still costs a signal and not a
+            # wait; collected outside it, because a player that is dead and
+            # unreaped still holds the sink open on a session that is meant to
+            # have released it. A process already sent SIGKILL returns from
+            # here in well under a millisecond.
+            await terminate_and_reap(proc, grace=self.STOP_GRACE)
         if self.on_level:
             self.on_level(0.0, [0.0, 0.0, 0.0, 0.0])
 
@@ -752,15 +861,17 @@ class Speaker:
             proc, self._proc = self._proc, None
             self._play_until = 0.0
         if proc and proc.returncode is None:
+            # Closing stdin first lets whatever is queued play out; the reap
+            # below is what guarantees it is gone either way.
             if proc.stdin:
                 try:
                     proc.stdin.close()
                 except Exception:  # noqa: BLE001
                     pass
             try:
-                await asyncio.wait_for(proc.wait(), timeout=2)
+                await asyncio.wait_for(proc.wait(), timeout=self.STOP_GRACE)
             except asyncio.TimeoutError:
-                proc.kill()
+                await terminate_and_reap(proc, grace=self.STOP_GRACE)
 
 
 async def _loopback(cfg: Config, seconds: float) -> int:
